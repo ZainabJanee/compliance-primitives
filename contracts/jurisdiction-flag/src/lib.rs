@@ -18,13 +18,19 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, String, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env,
+    String, Vec,
 };
 
 /// Extend persistent jurisdiction entries when TTL drops below this many ledgers.
 const TTL_THRESHOLD: u32 = 1_000;
 /// Target TTL (in ledgers) after extension.
 const TTL_EXTEND_TO: u32 = 5_000;
+
+/// Maximum number of entries accepted by `set_multiple_jurisdictions` in a
+/// single call.  Keeps transaction costs bounded and prevents resource
+/// exhaustion.
+pub const MAX_BATCH_SIZE: u32 = 100;
 
 #[contracttype]
 #[derive(Clone)]
@@ -34,6 +40,8 @@ enum DataKey {
     ComplianceOfficer,
     Jurisdiction(Address),
     Paused,
+    /// Pending issuer address proposed via `propose_issuer`. Instance storage.
+    PendingIssuer,
 }
 
 /// Emitted whenever a jurisdiction flag is set.
@@ -72,6 +80,16 @@ pub enum Error {
     /// Caller supplied an argument that is structurally invalid.
     InvalidInput = 4,
     ContractPaused = 5,
+    /// `is_permitted_jurisdiction` was called with an empty `allowed_codes`
+    /// list, which would always return false and is almost certainly a
+    /// caller mistake.
+    EmptyAllowedCodes = 6,
+    /// The pending-issuer key is absent; `accept_issuer` was called when
+    /// no transfer is in progress.
+    NoPendingIssuer = 7,
+    /// The address calling `accept_issuer` does not match the pending issuer
+    /// that was stored by `propose_issuer`.
+    PendingIssuerMismatch = 8,
 }
 
 #[contract]
@@ -138,21 +156,62 @@ impl JurisdictionFlag {
     /// Attach jurisdiction `code` to `address`. Issuer or compliance-officer.
     pub fn set_jurisdiction(
         env: Env,
-        issuer: Address,
+        caller: Address,
         address: Address,
         code: String,
     ) -> Result<(), Error> {
-        Self::require_compliance_authority(&env, &issuer)?;
+        Self::require_compliance_authority(&env, &caller)?;
+        Self::require_not_paused(&env)?;
+        Self::validate_code(&code)?;
 
         let key = DataKey::Jurisdiction(address.clone());
         env.storage().persistent().set(&key, &code);
         Self::extend_jurisdiction_ttl(&env, &key);
 
-        JurisdictionSet {
-            address,
-            code,
+        JurisdictionSet { address, code }.publish(&env);
+        Ok(())
+    }
+
+    /// Batch-set jurisdiction codes for multiple addresses in one transaction.
+    ///
+    /// `caller` must be the issuer or the compliance officer.  All entries are
+    /// validated **before** any writes, so one invalid code rejects the whole
+    /// batch without leaving partial state.  The batch is capped at
+    /// [`MAX_BATCH_SIZE`] entries.
+    ///
+    /// Added to resolve issue #604 — the missing batch setter that prevented
+    /// efficient cohort onboarding.
+    pub fn set_multiple_jurisdictions(
+        env: Env,
+        caller: Address,
+        entries: Vec<(Address, String)>,
+    ) -> Result<(), Error> {
+        Self::require_compliance_authority(&env, &caller)?;
+        Self::require_not_paused(&env)?;
+
+        // Reject empty or over-cap batches.
+        if entries.is_empty() || entries.len() as u32 > MAX_BATCH_SIZE {
+            return Err(Error::InvalidInput);
         }
-        .publish(&env);
+
+        // Validate ALL codes before writing anything so that a single bad
+        // entry fails the entire batch cleanly (no partial state).
+        for (_, code) in entries.iter() {
+            Self::validate_code(&code)?;
+        }
+
+        // All entries passed validation — now write.
+        for (address, code) in entries.iter() {
+            let key = DataKey::Jurisdiction(address.clone());
+            env.storage().persistent().set(&key, &code);
+            Self::extend_jurisdiction_ttl(&env, &key);
+            JurisdictionSet {
+                address: address.clone(),
+                code: code.clone(),
+            }
+            .publish(&env);
+        }
+
         Ok(())
     }
 
@@ -185,15 +244,21 @@ impl JurisdictionFlag {
     /// Returns `true` if `address` has a jurisdiction code that appears in
     /// `allowed_codes`. Meant to be called by other contracts enforcing a
     /// permitted-jurisdiction policy.
+    ///
+    /// Returns `Err(EmptyAllowedCodes)` when `allowed_codes` is empty, since
+    /// that always produces `false` and is almost certainly a caller mistake.
     pub fn is_permitted_jurisdiction(
         env: Env,
         address: Address,
         allowed_codes: Vec<String>,
-    ) -> bool {
-        match Self::get_jurisdiction(env, address) {
+    ) -> Result<bool, Error> {
+        if allowed_codes.is_empty() {
+            return Err(Error::EmptyAllowedCodes);
+        }
+        Ok(match Self::get_jurisdiction(env, address) {
             Some(code) => allowed_codes.iter().any(|c| c == code),
             None => false,
-        }
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -246,6 +311,39 @@ impl JurisdictionFlag {
             }
         }
         Err(Error::NotAuthorized)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), Error> {
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
+        if paused {
+            Err(Error::ContractPaused)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Validate that a jurisdiction code is non-empty and contains only
+    /// ASCII uppercase letters.  ISO 3166-1 alpha-2 (2 chars) and alpha-3
+    /// (3 chars) codes are the primary use case, but the contract does not
+    /// enforce length so callers may use longer regional codes.
+    fn validate_code(code: &String) -> Result<(), Error> {
+        if code.is_empty() {
+            return Err(Error::InvalidInput);
+        }
+        // Iterate over the raw byte representation: each byte must be an
+        // ASCII uppercase letter (A–Z).
+        let len = code.len() as usize;
+        for i in 0..len {
+            let b = code.get(i as u32).ok_or(Error::InvalidInput)?;
+            if !(b'A'..=b'Z').contains(&(b as u8)) {
+                return Err(Error::InvalidInput);
+            }
+        }
+        Ok(())
     }
 
     fn extend_jurisdiction_ttl(env: &Env, key: &DataKey) {
