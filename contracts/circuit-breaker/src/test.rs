@@ -162,3 +162,133 @@ fn test_metadata_after_initialization() {
         soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Admin proposal events — #608
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_propose_admin_emits_event() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    let events = env.events().all();
+    let (_contract_id, topics, _data) = events.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "admin_proposed").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), admin.clone().into_val(&env));
+}
+
+#[test]
+fn test_accept_admin_emits_transferred_event() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&new_admin);
+
+    let events = env.events().all();
+    let (_contract_id, topics, _data) = events.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "admin_transferred").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), new_admin.clone().into_val(&env));
+}
+
+// ---------------------------------------------------------------------------
+// cancel_admin_proposal — #608
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cancel_admin_proposal_succeeds() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+    client.cancel_admin_proposal(&admin);
+    assert_eq!(client.get_pending_admin(), None);
+}
+
+#[test]
+fn test_accept_after_cancel_returns_no_pending_admin() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+
+    let result = client.try_accept_admin(&new_admin);
+    assert_eq!(result, Err(Ok(Error::NoPendingAdmin)));
+}
+
+#[test]
+fn test_cancel_admin_proposal_no_pending_returns_error() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+
+    let result = client.try_cancel_admin_proposal(&admin);
+    assert_eq!(result, Err(Ok(Error::NoPendingAdmin)));
+}
+
+#[test]
+fn test_cancel_admin_proposal_non_admin_rejected() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    let result = client.try_cancel_admin_proposal(&impostor);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+
+    // Proposal is still pending.
+    assert_eq!(client.get_pending_admin(), Some(new_admin));
+}
+
+#[test]
+fn test_get_pending_admin_none_when_no_proposal() {
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
+
+    assert_eq!(client.get_pending_admin(), None);
+}
+
+#[test]
+fn test_get_pending_admin_returns_proposed() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    assert_eq!(client.get_pending_admin(), Some(new_admin));
+}
+
+#[test]
+fn test_cancel_then_old_admin_retains_control() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+
+    // Old admin still has control after cancellation.
+    client.freeze(&admin);
+    assert!(client.is_frozen());
+
+    // Proposed admin does not have control.
+    let result = client.try_unfreeze(&new_admin);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}
