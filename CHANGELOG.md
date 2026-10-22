@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **audit-log**: Admin-gated `upgrade(admin, new_wasm_hash)` entrypoint with an
+  `UpgradePerformed` event, module-level upgrade documentation, and an
+  `UPGRADE.md` describing the upgrade procedure and storage rules (#187)
 - **compliance-aggregator**: Admin-gated `upgrade(admin, new_wasm_hash)`
   entrypoint with an `UpgradePerformed` event, a migration test that
   deploys, writes state, upgrades, and verifies state is intact and callable,

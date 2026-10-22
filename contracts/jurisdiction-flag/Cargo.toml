@@ -19,9 +19,5 @@ compliance-pausable = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 compliance-pausable = { workspace = true, features = ["testutils"] }
 
-[[bench]]
-name = "remove_jurisdiction_multiple"
-harness = false
-
 [features]
 testutils = ["soroban-sdk/testutils", "compliance-pausable/testutils"]

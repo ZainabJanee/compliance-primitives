@@ -74,21 +74,19 @@
 //!
 //! ## Upgradeability
 //!
-//! `upgrade(admin, new_wasm_hash)` lets the configured admin move the
-//! contract's code to a new WASM hash via
-//! `env.deployer().update_current_contract_wasm`, following the same
-//! admin-gated pattern used elsewhere in the repo (see `jurisdiction-flag`).
-//! Storage (the admin key, `CombineOp`, and the registered `Checks` vec) is
-//! untouched by the WASM swap, so all state is preserved and the contract
-//! remains fully callable immediately after the upgrade. Only the admin can
-//! call `upgrade`; any other caller is rejected with `Error::NotAuthorized`.
+//! The admin can propose an upgrade with `propose_upgrade(admin, new_wasm,
+//! delay_ledgers)`. It can only be installed with `commit_upgrade` after the
+//! delay expires, and the admin can call `cancel_upgrade` during that window.
+//! The WASM swap preserves contract storage, including the admin, policy, and
+//! checks. A successful commit emits `UpgradePerformed`.
 //!
 //! ## Storage and TTL policy
 //!
 //! All state (admin, `CombineOp`, the `Checks` vec and the optional
 //! circuit-breaker address) lives in **instance** storage, which shares a
 //! single TTL with the contract instance itself. Every write path
-//! (`initialize`, `set_circuit_breaker`, `add_check`, `remove_check`)
+//! (`initialize`, `set_circuit_breaker`, `add_check`, `remove_check`,
+//! `propose_upgrade`, `cancel_upgrade`)
 //! finishes by extending that TTL: whenever the remaining TTL has dropped
 //! below [`INSTANCE_TTL_THRESHOLD`] (~7 days) it is bumped back up to
 //! [`INSTANCE_TTL_EXTEND_TO`] (~90 days). This keeps the policy from being
@@ -278,6 +276,15 @@ enum DataKey {
     /// Address of the `circuit-breaker` contract to consult, if any. When
     /// set and frozen, `evaluate` short-circuits to deny.
     CircuitBreaker,
+    PendingUpgrade,
+}
+
+/// Delayed upgrade proposal state.
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeState {
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +320,9 @@ pub enum Error {
     ContractPaused = 7,
     /// Returned by `get_check` when the requested index is out of range.
     CheckIndexOutOfRange = 8,
+    /// Returned by `commit_upgrade` when no upgrade is pending or its delay
+    /// has not elapsed.
+    UpgradeNotReady = 9,
 }
 
 /// Maximum number of checks that can be registered in a single policy
@@ -472,6 +482,52 @@ impl PolicyEngine {
         env.storage().instance().get(&DataKey::CircuitBreaker)
     }
 
+    /// Propose an upgrade to an uploaded Wasm hash. The admin may cancel it
+    /// before `delay_ledgers` have elapsed.
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm: BytesN<32>,
+        delay_ledgers: u32,
+    ) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        let state = UpgradeState {
+            new_wasm,
+            activated_at: u64::from(env.ledger().sequence())
+                .saturating_add(delay_ledgers as u64),
+        };
+        env.storage().instance().set(&DataKey::PendingUpgrade, &state);
+        Self::extend_instance_ttl(&env);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("upgprop"),), (admin, delay_ledgers));
+        Ok(())
+    }
+
+    /// Commit a pending upgrade after its delay has elapsed.
+    pub fn commit_upgrade(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        let state: UpgradeState = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(Error::UpgradeNotReady)?;
+        if u64::from(env.ledger().sequence()) < state.activated_at {
+            return Err(Error::UpgradeNotReady);
+        }
+        env.deployer().update_current_contract_wasm(state.new_wasm);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        UpgradePerformed { admin }.publish(&env);
+        Ok(())
+    }
+
+    /// Cancel a pending upgrade. Admin-only.
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        Self::extend_instance_ttl(&env);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Admin mutations
     // -----------------------------------------------------------------------
@@ -508,6 +564,9 @@ impl PolicyEngine {
             .instance()
             .get(&DataKey::Checks)
             .ok_or(Error::NotInitialized)?;
+        if index >= checks.len() {
+            return Err(Error::IndexOutOfBounds);
+        }
         checks.remove(index);
         env.storage().instance().set(&DataKey::Checks, &checks);
         Self::extend_instance_ttl(&env);
@@ -568,24 +627,6 @@ impl PolicyEngine {
     /// on-chain regardless of the result. `Err` is returned only for
     /// configuration failures (e.g. the contract was never initialized).
     pub fn evaluate(env: Env, from: Address, to: Address) -> Result<bool, Error> {
-        // Emergency freeze short-circuit: if a configured circuit-breaker is
-        // frozen, deny outright without evaluating any registered checks.
-        let breaker_addr: Option<Address> = env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::CircuitBreaker);
-        if let Some(addr) = breaker_addr {
-            if CircuitBreakerClient::new(&env, &addr).is_frozen() {
-                PolicyResult {
-                    passed: false,
-                    from: from.clone(),
-                    to: to.clone(),
-                }
-                .publish(&env);
-                return Ok(false);
-            }
-        }
-
         let checks: Vec<CheckKind> = env
             .storage()
             .instance()
@@ -596,49 +637,7 @@ impl PolicyEngine {
             .instance()
             .get(&DataKey::CombineOp)
             .ok_or(Error::NotInitialized)?;
-
-        let passed = match op {
-            CombineOp::All => {
-                // All checks must pass for both from and to.
-                let mut all_pass = true;
-                for i in 0..checks.len() {
-                    let check = checks.get(i).unwrap();
-                    if !Self::run_check(&env, &check, &from)
-                        || !Self::run_check(&env, &check, &to)
-                    {
-                        all_pass = false;
-                        break;
-                    }
-                }
-                all_pass
-            }
-            CombineOp::Any => {
-                // At least one check must pass for both from and to.
-                if checks.is_empty() {
-                    false
-                } else {
-                    let mut any_pass = false;
-                    for i in 0..checks.len() {
-                        let check = checks.get(i).unwrap();
-                        if Self::run_check(&env, &check, &from)
-                            && Self::run_check(&env, &check, &to)
-                        {
-                            any_pass = true;
-                            break;
-                        }
-                    }
-                    any_pass
-                }
-            }
-        };
-
-        PolicyResult {
-            passed,
-            from: from.clone(),
-            to: to.clone(),
-        }
-        .publish(&env);
-
+        let (passed, _) = Self::evaluate_inner(&env, &checks, &op, &from, &to);
         Ok(passed)
     }
 
@@ -646,10 +645,20 @@ impl PolicyEngine {
     ///
     /// Returns a `Vec<bool>` containing the pass/fail status for each pair in the same order.
     pub fn batch_evaluate(env: Env, pairs: Vec<AddressPair>) -> Result<Vec<bool>, Error> {
+        let checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        let op: CombineOp = env
+            .storage()
+            .instance()
+            .get(&DataKey::CombineOp)
+            .ok_or(Error::NotInitialized)?;
         let mut results = Vec::new(&env);
         for pair in pairs.iter() {
-            let res = Self::evaluate(env.clone(), pair.from, pair.to)?;
-            results.push_back(res);
+            let (passed, _) = Self::evaluate_inner(&env, &checks, &op, &pair.from, &pair.to);
+            results.push_back(passed);
         }
         Ok(results)
     }
@@ -672,23 +681,6 @@ impl PolicyEngine {
         from: Address,
         to: Address,
     ) -> Result<(bool, Option<CheckFailure>), Error> {
-        // Emergency freeze short-circuit (same as `evaluate`).
-        let breaker_addr: Option<Address> = env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::CircuitBreaker);
-        if let Some(addr) = breaker_addr {
-            if CircuitBreakerClient::new(&env, &addr).is_frozen() {
-                PolicyResult {
-                    passed: false,
-                    from: from.clone(),
-                    to: to.clone(),
-                }
-                .publish(&env);
-                return Ok((false, None));
-            }
-        }
-
         let checks: Vec<CheckKind> = env
             .storage()
             .instance()
@@ -699,20 +691,44 @@ impl PolicyEngine {
             .instance()
             .get(&DataKey::CombineOp)
             .ok_or(Error::NotInitialized)?;
+        let result = Self::evaluate_inner(&env, &checks, &op, &from, &to);
+        Ok(result)
+    }
 
-        let (passed, failure) = match op {
+    fn evaluate_inner(
+        env: &Env,
+        checks: &Vec<CheckKind>,
+        op: &CombineOp,
+        from: &Address,
+        to: &Address,
+    ) -> (bool, Option<CheckFailure>) {
+        let breaker_addr: Option<Address> = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::CircuitBreaker);
+        if let Some(addr) = breaker_addr {
+            if CircuitBreakerClient::new(env, &addr).is_frozen() {
+                PolicyResult {
+                    passed: false,
+                    from: from.clone(),
+                    to: to.clone(),
+                }
+                .publish(env);
+                return (false, None);
+            }
+        }
+
+        let result = match op {
             CombineOp::All => {
                 let mut result = (true, None);
                 for i in 0..checks.len() {
                     let check = checks.get(i).unwrap();
-                    if !Self::run_check(&env, &check, &from)
-                        || !Self::run_check(&env, &check, &to)
-                    {
+                    if !Self::run_check(env, &check, from) || !Self::run_check(env, &check, to) {
                         result = (
                             false,
                             Some(CheckFailure {
                                 check_index: i,
-                                kind: Self::check_kind_symbol(&env, &check),
+                                kind: Self::check_kind_symbol(env, &check),
                             }),
                         );
                         break;
@@ -727,9 +743,7 @@ impl PolicyEngine {
                     let mut any_pass = false;
                     for i in 0..checks.len() {
                         let check = checks.get(i).unwrap();
-                        if Self::run_check(&env, &check, &from)
-                            && Self::run_check(&env, &check, &to)
-                        {
+                        if Self::run_check(env, &check, from) && Self::run_check(env, &check, to) {
                             any_pass = true;
                             break;
                         }
@@ -737,13 +751,12 @@ impl PolicyEngine {
                     if any_pass {
                         (true, None)
                     } else {
-                        // Surface the first check as the representative failure.
                         let first = checks.get(0).unwrap();
                         (
                             false,
                             Some(CheckFailure {
                                 check_index: 0,
-                                kind: Self::check_kind_symbol(&env, &first),
+                                kind: Self::check_kind_symbol(env, &first),
                             }),
                         )
                     }
@@ -752,13 +765,12 @@ impl PolicyEngine {
         };
 
         PolicyResult {
-            passed,
+            passed: result.0,
             from: from.clone(),
             to: to.clone(),
         }
-        .publish(&env);
-
-        Ok((passed, failure))
+        .publish(env);
+        result
     }
 
     // -----------------------------------------------------------------------

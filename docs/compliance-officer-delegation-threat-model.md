@@ -99,9 +99,9 @@ pattern across contracts SHOULD be consistent.
 **Officer-accessible entry points:**
 - `add_to_denylist` (via `require_compliance_authority`)
 - `remove_from_denylist` (via `require_compliance_authority`)
+- `remove_multiple_from_denylist` (via `require_compliance_authority`)
 
 **Admin-only entry points (officer cannot call):**
-- `remove_multiple_from_denylist`
 - `set_compliance_officer`, `revoke_compliance_officer`
 - `set_audit_log`
 - `pause`, `unpause`

@@ -157,7 +157,7 @@ fn test_transfer_blocked_when_circuit_breaker_frozen() {
     onboard(&env, &fx, &bob, "CA");
 
     // Freeze the circuit breaker — all transfers must halt immediately.
-    CircuitBreakerClient::new(&env, &fx.breaker_id).freeze(&fx.breaker_admin);
+    CircuitBreakerClient::new(&env, &fx.breaker_id).freeze(&fx.breaker_admin, &None);
 
     fx.token.mint(&alice, &1_000);
     let result = fx.token.try_transfer(&alice, &bob, &400);

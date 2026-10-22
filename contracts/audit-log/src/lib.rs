@@ -23,6 +23,72 @@
 //!   than high-throughput transfer events; for the latter, rely on the
 //!   standard Soroban event stream.
 //!
+//! ## Write volume and storage growth
+//!
+//! Each `record` call does two storage writes: one new persistent entry at
+//! `DataKey::Entry(index)` and an update to the `EntryCount` counter in
+//! instance storage. Both are unmeasured estimates here; re-measure with the
+//! method in `BENCHMARKS.md` before relying on any number.
+//!
+//! - **Per-entry footprint** — roughly 150–300 bytes for typical entries
+//!   (two `Address` values, a `Symbol`, a `detail` string of up to a few
+//!   dozen bytes, and a `u32` ledger). Rent scales with bytes × retained
+//!   ledgers, so total storage cost grows linearly with event count and
+//!   retention period.
+//! - **Throughput ceiling** — every `record` on one instance reads and
+//!   writes the same `EntryCount` key, so calls serialize. A single audit
+//!   log cannot absorb more than roughly one `record` per ledger (about one
+//!   every ~5 seconds), and bursts of concurrent submissions should be
+//!   expected to fail and need retry.
+//! - **Volume guidance** (indicative, not benchmarked):
+//!   - up to ~1,000 events/day: direct on-chain logging is comfortable;
+//!   - ~1,000–10,000 events/day: viable, but budget for rent and retry
+//!     handling, and keep `detail` short;
+//!   - above ~10,000 events/day: keep the on-chain log for the events that
+//!     must be provable on-chain, rely on the Soroban event stream and an
+//!     off-chain indexer for the rest, and consider committing a periodic
+//!     hash or Merkle root of a batch on-chain instead of every event.
+//! - **TTL** — `record` extends each new entry's TTL (see "Storage and TTL
+//!   policy" below), but entries that are never touched again still expire
+//!   once that window lapses. Issuers relying on retention beyond ~90 days
+//!   must run an external restore/extend process; until then, do not treat
+//!   `get_entry` as a durable record past that window.
+//!
+//! ## Callers
+//!
+//! - **Writers (`record`)** — contracts registered as an audit-log source.
+//!   The caller passes its own address as `source`, and that address must
+//!   authorize the invocation (`source.require_auth()`), so one primitive
+//!   cannot write entries attributed to another. The ledger sequence is
+//!   stamped on each entry by the log itself.
+//! - **Admin (`initialize`, `pause`, `unpause`)** — the address passed to
+//!   `initialize` (exactly once) can pause and resume writes. The admin is
+//!   *not* checked on `record`: any authorized `source` may write while the
+//!   log is unpaused.
+//! - **Readers (`get_entry`, `entry_count`, `list_entries`, `is_paused`)** —
+//!   unauthenticated. Any contract, client, or script can read. `list_entries`
+//!   returns at most [`MAX_PAGE_SIZE`] entries per call and fails with
+//!   `PageTooLarge` above that, so larger reads page through `start`.
+//! - **Indexers** — subscribe to the `ComplianceEvent` contract event
+//!   (topics: `kind`, `subject`) rather than polling storage.
+//!
+//! ## Composition with the other primitives
+//!
+//! `audit-log` has no dependency on the other compliance contracts; its only
+//! workspace dependency is the shared `compliance-pausable` crate, which
+//! provides the pause storage and the write guard used by `pause`,
+//! `unpause`, and `record`.
+//!
+//! - **`denylist-gate`** is the reference integration. It depends on this
+//!   crate and exposes `set_audit_log(admin, audit_log_id)`. Once set, each
+//!   denylist add and remove calls `record` through the generated
+//!   `AuditLogClient`, with `deny_add` / `deny_remove` as the kind and the
+//!   denylisted address as the subject.
+//! - **`AuditLogInterface`** (below) is the trait to copy or depend on when a
+//!   caller wants to invoke `record` without linking this contract's binary.
+//! - Other primitives do not write to the log today. Wiring one in follows
+//!   the same opt-in pattern.
+//!
 //! ## Opt-in integration pattern
 //!
 //! This contract is **not** called automatically by the other primitives.
@@ -37,19 +103,52 @@
 //!
 //! If `set_audit_log` is never called, the primitive behaves exactly as
 //! before: the audit log path is guarded by an `if let Some(...)` check on
-//! the stored audit-log address, so the cost and code path are zero when
-//! the feature is not configured.
+//! the stored audit-log address, so it adds no cross-contract call when the
+//! feature is not configured.
+//!
+//! ## Storage and TTL policy
+//!
+//! Each log entry lives in **persistent** storage under its own key. Every
+//! write path (`record`) extends that entry's TTL: whenever the remaining TTL
+//! has dropped below [`ENTRY_TTL_THRESHOLD`] (~7 days) it is bumped back up to
+//! [`ENTRY_TTL_EXTEND_TO`] (~90 days). This keeps recorded events from being
+//! archived by Soroban state expiration — an archived entry would make
+//! `get_entry` and `list_entries` return nothing until a manual restore.
+//!
+//! ## Upgradeability
+//!
+//! `upgrade(admin, new_wasm_hash)` lets the configured admin move the
+//! contract's code to a new WASM hash via
+//! `env.deployer().update_current_contract_wasm`, following the same
+//! admin-gated pattern used by `compliance-aggregator` and `jurisdiction-flag`.
+//! Only the stored admin may call it; any other caller is rejected with
+//! `Error::NotAuthorized`, and calling it before `initialize` returns
+//! `Error::NotInitialized`. An `UpgradePerformed` event is emitted so the
+//! upgrade is visible to indexers.
+//!
+//! The WASM swap does not touch storage: the admin key and the entry counter
+//! live in instance storage, and every `Entry(index)` lives in persistent
+//! storage under the same `DataKey` variants, so the log is intact and
+//! callable immediately after the upgrade. See `UPGRADE.md` in this crate for
+//! the full procedure and the storage rules a new version must follow.
 #![no_std]
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contracttype, Address,
-    Env, String, Symbol, Vec,
+    BytesN, Env, String, Symbol, Vec,
 };
 
 /// Maximum number of entries `list_entries` will return in a single call.
 /// Bounds the resources consumed by a single invocation regardless of how
 /// large `limit` is requested.
 pub const MAX_PAGE_SIZE: u32 = 100;
+
+/// Extend a persistent log entry when its remaining TTL drops below this many
+/// ledgers (~7 days at ~5s/ledger).
+pub const ENTRY_TTL_THRESHOLD: u32 = 120_960;
+/// Target remaining TTL, in ledgers, after an entry is extended (~90 days at
+/// ~5s/ledger).
+pub const ENTRY_TTL_EXTEND_TO: u32 = 1_555_200;
 
 // ---------------------------------------------------------------------------
 // Storage types
@@ -100,6 +199,27 @@ pub struct ComplianceEvent {
     pub detail: String,
 }
 
+/// Emitted whenever the contract is upgraded to a new WASM implementation,
+/// for on-chain auditability of the upgrade path.
+#[contractevent]
+pub struct UpgradePerformed {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm_hash: BytesN<32>,
+}
+
+#[contractevent]
+pub struct Paused {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+pub struct Unpaused {
+    #[topic]
+    pub admin: Address,
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -113,13 +233,15 @@ pub enum Error {
     NotAuthorized = 3,
     /// `limit` passed to `list_entries` exceeds [`MAX_PAGE_SIZE`].
     PageTooLarge = 4,
+    /// `record` was called while the contract is paused.
+    ContractPaused = 5,
 }
 
 // ---------------------------------------------------------------------------
 // Cross-contract client trait (for callers of this contract)
 // ---------------------------------------------------------------------------
 
-/// Trait that generates `AuditLogClient` via `#[contractclient]`. Other
+/// Trait that generates `AuditLogInterfaceClient` via `#[contractclient]`. Other
 /// contracts that want to cross-call `audit-log.record(...)` should define
 /// this same trait locally (or depend on this crate's `rlib`) and use the
 /// generated client rather than linking the full contract binary.
@@ -165,7 +287,10 @@ impl AuditLog {
     pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         compliance_pausable::pause(&env);
-        env.events().publish((), soroban_sdk::symbol_short!("Paused"));
+        Paused {
+            admin: admin.clone(),
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -173,13 +298,33 @@ impl AuditLog {
     pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         compliance_pausable::unpause(&env);
-        env.events().publish((), soroban_sdk::symbol_short!("Unpaused"));
+        Unpaused {
+            admin: admin.clone(),
+        }
+        .publish(&env);
         Ok(())
     }
 
     /// Check if the contract is currently paused.
     pub fn is_paused(env: Env) -> bool {
         compliance_pausable::is_paused(&env)
+    }
+
+    /// Upgrade the contract WASM. Admin-only.
+    ///
+    /// Swaps the code behind this contract ID to `new_wasm_hash` (which must
+    /// already be uploaded to the network). The admin key, the entry counter
+    /// and every recorded entry are preserved across the upgrade. See the
+    /// module-level "Upgradeability" section for the full procedure.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        UpgradePerformed {
+            admin,
+            new_wasm_hash: new_wasm_hash.clone(),
+        }
+        .publish(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
     }
 
     /// Append a compliance event to the log.
@@ -219,9 +364,11 @@ impl AuditLog {
             ledger: env.ledger().sequence(),
         };
 
+        let entry_key = DataKey::Entry(index);
+        env.storage().persistent().set(&entry_key, &entry);
         env.storage()
             .persistent()
-            .set(&DataKey::Entry(index), &entry);
+            .extend_ttl(&entry_key, ENTRY_TTL_THRESHOLD, ENTRY_TTL_EXTEND_TO);
 
         env.storage()
             .instance()
@@ -244,6 +391,16 @@ impl AuditLog {
         env.storage()
             .persistent()
             .get(&DataKey::Entry(index))
+    }
+
+    /// Return up to `count` log entries starting at zero-based index `start`.
+    ///
+    /// Unlike [`AuditLog::list_entries`], an oversized `count` is clamped to
+    /// [`MAX_PAGE_SIZE`] rather than rejected. Fewer entries are returned when
+    /// the range runs past `entry_count()`.
+    pub fn get_entries(env: Env, start: u64, count: u32) -> Vec<LogEntry> {
+        let limit = count.min(MAX_PAGE_SIZE);
+        Self::list_entries(env.clone(), start, limit).unwrap_or(Vec::new(&env))
     }
 
     /// Return the total number of entries recorded so far.
@@ -288,6 +445,20 @@ impl AuditLog {
         }
 
         Ok(entries)
+    }
+
+    /// Require `admin` to authorize the call and to match the stored admin.
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        if stored_admin != *admin {
+            return Err(Error::NotAuthorized);
+        }
+        Ok(())
     }
 }
 
