@@ -460,9 +460,9 @@ fn test_approve_accumulates_distinct_approvals() {
 }
 
 /// A signer cannot approve the same proposal twice; the second call returns
-/// Ok(false) without double-counting toward the threshold.
+/// Err(AlreadyApproved) — a distinct, unambiguous error code.
 #[test]
-fn test_approve_same_signer_twice_does_not_double_count() {
+fn test_approve_same_signer_twice_returns_already_approved() {
     let env = Env::default();
     env.mock_all_auths();
     let (signers, _id, client) = setup_multisig(&env, 3, 2);
@@ -473,9 +473,10 @@ fn test_approve_same_signer_twice_does_not_double_count() {
 
     let signer0 = signers.get(0).unwrap();
     client.approve(&proposal_id, &signer0);
-    // Second call from the same signer — should not increment the count.
-    let ready = client.approve(&proposal_id, &signer0);
-    assert!(!ready, "duplicate approval must not push the count to threshold");
+    // Second call from the same signer — must return a distinct error, not
+    // silently return Ok(false) which is indistinguishable from "not yet at threshold".
+    let result = client.try_approve(&proposal_id, &signer0);
+    assert_eq!(result, Err(Ok(Error::AlreadyApproved)));
 
     // Verify only 1 approval is stored.
     let (_, _, approvals) = client.get_proposal(&proposal_id);
@@ -495,7 +496,7 @@ fn test_approve_by_non_signer_rejected() {
 
     let outsider = Address::generate(&env);
     let result = client.try_approve(&proposal_id, &outsider);
-    assert_eq!(result, Err(Ok(Error::ThresholdNotMet)));
+    assert_eq!(result, Err(Ok(Error::NotASigner)));
 }
 
 /// execute() succeeds once the threshold is met.
@@ -840,6 +841,30 @@ fn test_budget_regression_multisig_check_auth() {
     ));
     let baseline = read_baseline(&baseline_path, "multisig-admin.__check_auth");
     assert_budget_within_threshold(measured, baseline, "multisig-admin __check_auth");
+}
+
+// ---------------------------------------------------------------------------
+// #614 — NotASigner / AlreadyApproved error discriminants
+// ---------------------------------------------------------------------------
+
+/// Error discriminants must be appended (not reordered). Existing codes
+/// must stay at their assigned values; new ones follow.
+#[test]
+fn test_error_discriminants_not_reordered() {
+    assert_eq!(Error::NotInitialized as u32, 1);
+    assert_eq!(Error::AlreadyInitialized as u32, 2);
+    assert_eq!(Error::ThresholdNotMet as u32, 3);
+    assert_eq!(Error::InvalidThreshold as u32, 4);
+    assert_eq!(Error::SignerNotFound as u32, 5);
+    assert_eq!(Error::AlreadySigner as u32, 6);
+    assert_eq!(Error::DuplicateSignature as u32, 7);
+    assert_eq!(Error::ContractPaused as u32, 8);
+    assert_eq!(Error::ProposalNotFound as u32, 9);
+    assert_eq!(Error::ExpiredProposal as u32, 10);
+    assert_eq!(Error::DuplicateSigner as u32, 11);
+    // New — appended after existing codes.
+    assert_eq!(Error::NotASigner as u32, 12);
+    assert_eq!(Error::AlreadyApproved as u32, 13);
 }
 
 // ---------------------------------------------------------------------------

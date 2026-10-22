@@ -281,6 +281,10 @@ pub enum Error {
     /// distinct signer addresses, so a duplicated entry can make the
     /// threshold impossible to reach.
     DuplicateSigner = 11,
+    /// The caller is not in the current signer set.
+    NotASigner = 12,
+    /// The signer has already approved this proposal.
+    AlreadyApproved = 13,
 }
 
 // ---------------------------------------------------------------------------
@@ -576,13 +580,13 @@ impl MultisigAdmin {
             }
         }
         if !is_valid_signer {
-            return Err(Error::ThresholdNotMet);
+            return Err(Error::NotASigner);
         }
 
         // Check if already approved.
         for i in 0..proposal.approvals.len() {
             if proposal.approvals.get(i).unwrap() == approver {
-                return Ok(false);
+                return Err(Error::AlreadyApproved);
             }
         }
 
