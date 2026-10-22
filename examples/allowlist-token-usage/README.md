@@ -1,8 +1,14 @@
 # allowlist-token-usage
 
-An end-to-end shell script walkthrough of `allowlist-token`: from deploying the
-contract to observing a successful transfer and a blocked one (with the `Blocked`
-event) from the CLI.
+An end-to-end walkthrough of `allowlist-token`: from deploying the contract to
+observing a successful transfer and a blocked one (with the `Blocked` event).
+It ships two ways:
+
+- `run.sh` — a shell script driving the contract from the Stellar CLI.
+- `src/lib.rs` — a Rust crate exposing `walkthrough()`, which runs the same
+  lifecycle in-process through a generated `AllowlistClient`. It returns an
+  `Outcome` so callers can assert on the blocked and allowed transfers and on
+  `is_allowed` after removal.
 
 ## What this covers
 

@@ -181,7 +181,7 @@ fn test_circuit_breaker_halts_flow_before_policy_check() {
     // The multisig-admin contract is the circuit-breaker's admin; under
     // `mock_all_auths` its `require_auth` (routed through `__check_auth`)
     // is satisfied for this call.
-    CircuitBreakerTestClient::new(&env, &breaker_id).freeze(&multisig_id);
+    CircuitBreakerTestClient::new(&env, &breaker_id).freeze(&multisig_id, &None);
     assert!(CircuitBreakerTestClient::new(&env, &breaker_id).is_frozen());
 
     let result = execute_transfer(

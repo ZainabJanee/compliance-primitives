@@ -65,7 +65,7 @@ fn test_transfer_fails_when_breaker_frozen() {
     let bob = Address::generate(&env);
 
     // Freeze the breaker
-    BreakerClient::new(&env, &breaker_id).freeze(&breaker_admin);
+    BreakerClient::new(&env, &breaker_id).freeze(&breaker_admin, &None);
 
     let result = GatedTransferContract::check_transfer(&env, &breaker_id, &policy_id, &alice, &bob);
     assert_eq!(result, Err(Error::CircuitBreakerFrozen));
@@ -81,7 +81,7 @@ fn test_transfer_recovers_after_unfreeze() {
     let bob = Address::generate(&env);
 
     // Freeze the breaker
-    BreakerClient::new(&env, &breaker_id).freeze(&breaker_admin);
+    BreakerClient::new(&env, &breaker_id).freeze(&breaker_admin, &None);
     let result = GatedTransferContract::check_transfer(&env, &breaker_id, &policy_id, &alice, &bob);
     assert_eq!(result, Err(Error::CircuitBreakerFrozen));
 
@@ -120,7 +120,7 @@ fn test_breaker_takes_precedence_over_policy() {
     DenylistGateClient::new(&env, &gate_id).add_to_denylist(&gate_admin, &bob);
 
     // Freeze the breaker
-    BreakerClient::new(&env, &breaker_id).freeze(&breaker_admin);
+    BreakerClient::new(&env, &breaker_id).freeze(&breaker_admin, &None);
 
     // Should get CircuitBreakerFrozen error, not PolicyViolation
     let result = GatedTransferContract::check_transfer(&env, &breaker_id, &policy_id, &alice, &bob);

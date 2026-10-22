@@ -45,3 +45,19 @@ memory = 400000
 [multisig-admin.__check_auth]
 cpu = 250000
 memory = 40000
+
+# audit-log's hottest entrypoint: `record` appends one persistent entry per
+# compliance event. Measured against an empty log with one record call
+# (`test_budget_regression_audit_log_record`). CI fails if either value
+# regresses by more than 10%.
+[audit-log.record]
+cpu = 1
+memory = 1
+
+# circuit-breaker's hottest entrypoint: `is_frozen`, read on every check by
+# consumers such as `compliance-aggregator`. Measured by
+# `test_budget_regression_is_frozen`. CI fails if either value regresses by
+# more than 10%.
+[circuit-breaker.is_frozen]
+cpu = 1
+memory = 1

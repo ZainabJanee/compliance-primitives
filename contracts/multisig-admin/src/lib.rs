@@ -114,8 +114,9 @@
 //!
 //! `upgrade(new_wasm_hash)` moves the contract's code to a new WASM hash via
 //! `env.deployer().update_current_contract_wasm`, following the same
-//! admin-gated pattern as `jurisdiction-flag::upgrade` and
-//! `policy-engine::upgrade`. Because this contract *is* the admin, the gate is
+//! admin-gated pattern as `jurisdiction-flag::upgrade` and the
+//! `policy-engine::propose_upgrade` / `commit_upgrade` / `cancel_upgrade` flow.
+//! Because this contract *is* the admin, the gate is
 //! `env.current_contract_address().require_auth()` — the upgrade must be
 //! approved by the current M-of-N signer threshold through `__check_auth`,
 //! exactly like `add_signer` / `update_threshold`.
@@ -275,6 +276,15 @@ pub enum Error {
     ProposalNotFound = 9,
     /// The proposal has passed its expiry ledger sequence.
     ExpiredProposal = 10,
+    /// A duplicate signer address was found in the `signers` list passed to
+    /// `initialize`. Duplicates are rejected because `__check_auth` counts
+    /// distinct signer addresses, so a duplicated entry can make the
+    /// threshold impossible to reach.
+    DuplicateSigner = 11,
+    /// The caller is not in the current signer set.
+    NotASigner = 12,
+    /// The signer has already approved this proposal.
+    AlreadyApproved = 13,
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +311,21 @@ impl MultisigAdmin {
         if env.storage().instance().has(&DataKey::Threshold) {
             return Err(Error::AlreadyInitialized);
         }
+
+        // Reject duplicate signer addresses. `__check_auth` counts distinct
+        // signer addresses, so a duplicate entry means the effective signer
+        // count is smaller than `signers.len()` and a threshold validated
+        // against the raw count can be impossible to reach — permanently
+        // locking the contract and everything it governs.
+        for i in 0..signers.len() {
+            let addr_i = signers.get(i).unwrap();
+            for j in (i + 1)..signers.len() {
+                if signers.get(j).unwrap() == addr_i {
+                    return Err(Error::DuplicateSigner);
+                }
+            }
+        }
+
         if threshold == 0 || threshold as usize > signers.len() as usize {
             return Err(Error::InvalidThreshold);
         }
@@ -555,13 +580,13 @@ impl MultisigAdmin {
             }
         }
         if !is_valid_signer {
-            return Err(Error::ThresholdNotMet);
+            return Err(Error::NotASigner);
         }
 
         // Check if already approved.
         for i in 0..proposal.approvals.len() {
             if proposal.approvals.get(i).unwrap() == approver {
-                return Ok(false);
+                return Err(Error::AlreadyApproved);
             }
         }
 
@@ -601,7 +626,27 @@ impl MultisigAdmin {
             .get(&DataKey::Threshold)
             .ok_or(Error::NotInitialized)?;
 
-        if (proposal.approvals.len() as u32) < threshold {
+        // Count only approvals from addresses still in the current signer set.
+        // If a signer was removed after approving (e.g. compromised key), their
+        // earlier approval must not count toward the threshold.
+        let signers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Signers)
+            .ok_or(Error::NotInitialized)?;
+
+        let mut valid_approval_count: u32 = 0;
+        for i in 0..proposal.approvals.len() {
+            let approver = proposal.approvals.get(i).unwrap();
+            for j in 0..signers.len() {
+                if signers.get(j).unwrap() == approver {
+                    valid_approval_count += 1;
+                    break;
+                }
+            }
+        }
+
+        if valid_approval_count < threshold {
             return Err(Error::ThresholdNotMet);
         }
 

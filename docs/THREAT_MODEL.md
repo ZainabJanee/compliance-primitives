@@ -72,7 +72,7 @@ not apply. (Confirmed by reading `lib.rs`: all write entry points require `admin
 | ID | Scenario | Sev | Lik | Mitigation |
 |----|----------|-----|-----|------------|
 | D1 | **Read griefing** — `check` is a public read; same fee model as A1. Low impact (caller pays). | Low | High | Accepted; caller contracts should cache. |
-| D2 | **Mass removal griefing** — `remove_multiple_from_denylist` by a compromised admin wipes the denylist, unblocking sanctioned addresses. | High | Low | `multisig` signers can require >1 approval; `pause` (admin) halts integrators' `check` usage if they honor pause. |
+| D2 | **Mass removal griefing** — `remove_multiple_from_denylist` by a compromised admin or compliance officer wipes the denylist, unblocking sanctioned addresses. | High | Low | `multisig` signers can require >1 approval on admin actions; `pause` (admin) halts integrators' `check` usage if they honor pause. Officer key compromise is not covered by multisig. |
 
 **Storage-fill check**: all denylist writes are admin/compliance-officer only. No
 non-admin write path → storage-fill griefing not applicable.

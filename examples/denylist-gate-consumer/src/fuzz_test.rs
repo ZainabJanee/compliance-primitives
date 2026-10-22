@@ -168,7 +168,7 @@ fn run_sequence(seed: u32, ops_per_iter: u32) {
 
         match op {
             Op::Freeze => {
-                breaker.freeze(&breaker_admin);
+                breaker.freeze(&breaker_admin, &None);
                 is_frozen = true;
             }
 

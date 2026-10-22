@@ -42,6 +42,11 @@ const TTL_THRESHOLD: u32 = 1_000;
 /// Target TTL (in ledgers) after extension.
 const TTL_EXTEND_TO: u32 = 5_000;
 
+/// Maximum number of entries accepted by `set_multiple_jurisdictions` in a
+/// single call. Keeps transaction costs bounded and prevents resource
+/// exhaustion.
+pub const MAX_BATCH_SIZE: u32 = 100;
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -54,6 +59,8 @@ enum DataKey {
     /// never expires.
     ValidUntil(Address),
     Paused,
+    /// Pending issuer address proposed via `propose_issuer`. Instance storage.
+    PendingIssuer,
 }
 
 /// Emitted whenever a jurisdiction flag is set.
@@ -86,6 +93,22 @@ pub struct IssuerTransferred {
     pub new_issuer: Address,
 }
 
+/// Emitted when `propose_issuer` is called.
+#[contractevent]
+pub struct IssuerProposed {
+    #[topic]
+    pub current_issuer: Address,
+    #[topic]
+    pub proposed_issuer: Address,
+}
+
+/// Emitted when the current issuer cancels a pending proposal.
+#[contractevent]
+pub struct IssuerProposalCancelled {
+    #[topic]
+    pub issuer: Address,
+}
+
 #[contractevent]
 pub struct Paused {
     #[topic]
@@ -114,6 +137,11 @@ pub enum Error {
     InvalidJurisdictionCode = 6,
     /// The `allowed_codes` list passed to `is_permitted_jurisdiction` was empty.
     EmptyAllowedCodes = 7,
+    /// `accept_issuer` was called when no transfer is in progress.
+    NoPendingIssuer = 8,
+    /// The address calling `accept_issuer` does not match the pending issuer
+    /// stored by `propose_issuer`.
+    PendingIssuerMismatch = 9,
 }
 
 #[contract]
@@ -162,11 +190,68 @@ impl JurisdictionFlag {
     ) -> Result<(), Error> {
         Self::require_issuer(&env, &current_issuer)?;
         env.storage().instance().set(&DataKey::Issuer, &new_issuer);
+        // Clear any outstanding proposal so a stale proposed address cannot
+        // accept after this rotation.
+        env.storage().instance().remove(&DataKey::PendingIssuer);
         IssuerTransferred {
             old_issuer: current_issuer,
             new_issuer,
         }
         .publish(&env);
+        Ok(())
+    }
+
+    /// Propose a new issuer. The current issuer retains full control until
+    /// the proposed issuer calls `accept_issuer`, so a typo in `new_issuer`
+    /// cannot permanently lose control of the contract. Calling it again
+    /// overwrites any pending proposal; `transfer_issuer` (single-step
+    /// break-glass rotation) also clears it.
+    pub fn propose_issuer(env: Env, issuer: Address, new_issuer: Address) -> Result<(), Error> {
+        Self::require_issuer(&env, &issuer)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingIssuer, &new_issuer);
+        IssuerProposed {
+            current_issuer: issuer,
+            proposed_issuer: new_issuer,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Accept a pending issuer proposal. Must be called by the exact address
+    /// passed to `propose_issuer`; it becomes the issuer and the proposal is
+    /// cleared.
+    pub fn accept_issuer(env: Env, new_issuer: Address) -> Result<(), Error> {
+        new_issuer.require_auth();
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingIssuer)
+            .ok_or(Error::NoPendingIssuer)?;
+        if pending != new_issuer {
+            return Err(Error::PendingIssuerMismatch);
+        }
+        let old_issuer: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Issuer)
+            .ok_or(Error::NotInitialized)?;
+        env.storage().instance().set(&DataKey::Issuer, &new_issuer);
+        env.storage().instance().remove(&DataKey::PendingIssuer);
+        IssuerTransferred {
+            old_issuer,
+            new_issuer,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Cancel a pending issuer proposal. Issuer-only.
+    pub fn cancel_issuer_proposal(env: Env, issuer: Address) -> Result<(), Error> {
+        Self::require_issuer(&env, &issuer)?;
+        env.storage().instance().remove(&DataKey::PendingIssuer);
+        IssuerProposalCancelled { issuer }.publish(&env);
         Ok(())
     }
 
@@ -276,6 +361,53 @@ impl JurisdictionFlag {
             code,
         }
         .publish(&env);
+        Ok(())
+    }
+
+    /// Batch-set jurisdiction codes for multiple addresses in one transaction.
+    ///
+    /// Behaves like calling [`set_jurisdiction`](Self::set_jurisdiction) once
+    /// per entry: each address's codes are replaced by the single given code
+    /// and any `valid_until` is cleared. `caller` must be the issuer or the
+    /// compliance officer. All codes are validated **before** any writes, so
+    /// one invalid code rejects the whole batch without leaving partial state.
+    ///
+    /// # Errors
+    /// [`Error::ContractPaused`] while the contract is paused;
+    /// [`Error::InvalidInput`] if `entries` is empty or longer than
+    /// [`MAX_BATCH_SIZE`]; [`Error::InvalidJurisdictionCode`] if any code is
+    /// malformed.
+    pub fn set_multiple_jurisdictions(
+        env: Env,
+        caller: Address,
+        entries: Vec<(Address, String)>,
+    ) -> Result<(), Error> {
+        Self::require_compliance_authority(&env, &caller)?;
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
+        if paused {
+            return Err(Error::ContractPaused);
+        }
+
+        if entries.is_empty() || entries.len() > MAX_BATCH_SIZE {
+            return Err(Error::InvalidInput);
+        }
+        for (_, code) in entries.iter() {
+            Self::validate_jurisdiction_code(&code)?;
+        }
+
+        for (address, code) in entries.iter() {
+            let mut codes = Vec::new(&env);
+            codes.push_back(code.clone());
+            Self::store_jurisdictions(&env, &address, &codes);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::ValidUntil(address.clone()));
+            JurisdictionSet { address, code }.publish(&env);
+        }
         Ok(())
     }
 

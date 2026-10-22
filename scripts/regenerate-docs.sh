@@ -23,13 +23,19 @@ cd "$REPO_ROOT"
 DOCS_DIR="docs/interfaces"
 WASM_DIR="target/wasm32v1-none/release"
 
-# Ordered list of crate names.  WASM file names are derived by replacing
-# hyphens with underscores.
+# Ordered list of contract crate names (the nine deployable contracts; the
+# pausable crate is a library helper and has no wasm of its own).  WASM file
+# names are derived by replacing hyphens with underscores.
 CRATES=(
   "allowlist-token"
+  "audit-log"
+  "circuit-breaker"
+  "compliance-aggregator"
+  "compliance-check"
   "denylist-gate"
   "jurisdiction-flag"
-  "denylist-gate-consumer"
+  "multisig-admin"
+  "policy-engine"
 )
 
 # ── prerequisites ──────────────────────────────────────────────────────────
@@ -63,11 +69,9 @@ for crate in "${CRATES[@]}"; do
     --output json \
     > "${DOCS_DIR}/${crate}.json"
 
-  # Older stellar CLI versions may require --output xdr-base64 or
-  # --output xdr-base64-array instead of --output xdr.
   stellar contract inspect \
     --wasm "$wasm_path" \
-    --output xdr \
+    --output xdr-base64 \
     > "${DOCS_DIR}/${crate}.xdr"
 done
 
