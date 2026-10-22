@@ -119,6 +119,25 @@ pub struct Unfrozen {
     pub admin: Address,
 }
 
+/// Emitted when a new admin is proposed via `propose_admin`.
+/// The current admin is in the topic, the proposed new admin in `data`.
+#[contractevent]
+pub struct AdminProposed {
+    #[topic]
+    pub admin: Address,
+    pub new_admin: Address,
+}
+
+/// Emitted when a proposed admin accepts the transfer via `accept_admin`.
+/// The new (now current) admin is in the topic; the previous admin is in
+/// `data` so monitoring can trace the full rotation.
+#[contractevent]
+pub struct AdminTransferred {
+    #[topic]
+    pub new_admin: Address,
+    pub old_admin: Address,
+}
+
 #[contractclient(name = "AuditLogClient")]
 pub trait AuditLogInterface {
     fn record(env: Env, source: Address, kind: Symbol, subject: Address, detail: String);
@@ -253,6 +272,11 @@ impl CircuitBreaker {
     pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        AdminProposed {
+            admin: admin.clone(),
+            new_admin: new_admin.clone(),
+        }
+        .publish(&env);
         Self::extend_instance_ttl(&env);
         Ok(())
     }
@@ -269,8 +293,18 @@ impl CircuitBreaker {
         if pending_admin != new_admin {
             return Err(Error::PendingAdminMismatch);
         }
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        AdminTransferred {
+            new_admin: new_admin.clone(),
+            old_admin,
+        }
+        .publish(&env);
         Self::extend_instance_ttl(&env);
         Ok(())
     }
@@ -290,6 +324,22 @@ impl CircuitBreaker {
         .publish(&env);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
+    }
+
+    /// Cancel a pending admin proposal. Only the current admin can cancel.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        if !env.storage().instance().has(&DataKey::PendingAdmin) {
+            return Err(Error::NoPendingAdmin);
+        }
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
+    }
+
+    /// Returns the pending admin address if one has been proposed and
+    /// not yet cancelled or accepted.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
     /// Returns metadata about this contract instance, including version and
