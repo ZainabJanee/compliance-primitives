@@ -405,6 +405,56 @@ fn test_unpause_rejects_non_admin() {
 }
 
 // ---------------------------------------------------------------------------
+// Detail-length cap — issue #572
+// ---------------------------------------------------------------------------
+
+/// A `detail` string of exactly `MAX_DETAIL_LEN` bytes must be accepted.
+#[test]
+fn test_record_detail_at_max_len_is_accepted() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+
+    // Build a string of exactly MAX_DETAIL_LEN 'a' characters.
+    let detail_bytes = [b'a'; MAX_DETAIL_LEN as usize];
+    let detail_str = core::str::from_utf8(&detail_bytes).unwrap();
+    let detail = soroban_sdk::String::from_str(&env, detail_str);
+
+    let result = client.try_record(&source, &kind, &subject, &detail);
+    assert!(result.is_ok(), "exactly MAX_DETAIL_LEN bytes must be accepted");
+    assert_eq!(client.entry_count(), 1u64);
+}
+
+/// A `detail` string of `MAX_DETAIL_LEN + 1` bytes must be rejected with
+/// `Error::DetailTooLong`.
+#[test]
+fn test_record_detail_one_over_max_len_is_rejected() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+
+    // Build a string of MAX_DETAIL_LEN + 1 'a' characters.
+    let detail_bytes = [b'a'; MAX_DETAIL_LEN as usize + 1];
+    let detail_str = core::str::from_utf8(&detail_bytes).unwrap();
+    let detail = soroban_sdk::String::from_str(&env, detail_str);
+
+    let result = client.try_record(&source, &kind, &subject, &detail);
+    assert_eq!(
+        result,
+        Err(Ok(Error::DetailTooLong)),
+        "MAX_DETAIL_LEN + 1 bytes must be rejected with DetailTooLong"
+    );
+    // No entry must have been written.
+    assert_eq!(client.entry_count(), 0u64);
+}
+
+// ---------------------------------------------------------------------------
 // Resource-fee benchmark (budget regression) — `record`
 //
 // `record` is audit-log's hottest entrypoint: every state-mutating call on an

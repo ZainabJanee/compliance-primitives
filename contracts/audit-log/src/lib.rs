@@ -143,6 +143,13 @@ use soroban_sdk::{
 /// large `limit` is requested.
 pub const MAX_PAGE_SIZE: u32 = 100;
 
+/// Maximum byte length of the `detail` string passed to `record`.
+///
+/// Keeping entries small limits per-entry storage cost and prevents a caller
+/// from hitting Soroban's per-entry size cap mid-integration. Callers should
+/// check against this constant before constructing a `record` call.
+pub const MAX_DETAIL_LEN: u32 = 256;
+
 /// Extend a persistent log entry when its remaining TTL drops below this many
 /// ledgers (~7 days at ~5s/ledger).
 pub const ENTRY_TTL_THRESHOLD: u32 = 120_960;
@@ -166,7 +173,8 @@ pub struct LogEntry {
     pub kind: Symbol,
     /// The address the event is *about* (the address being denied, flagged, etc.).
     pub subject: Address,
-    /// Free-form detail string for additional context (kept short to limit storage cost).
+    /// Free-form detail string for additional context. Length is capped at
+    /// [`MAX_DETAIL_LEN`] bytes to limit per-entry storage cost.
     pub detail: String,
     /// The ledger sequence number at the time of recording.
     pub ledger: u32,
@@ -235,6 +243,8 @@ pub enum Error {
     PageTooLarge = 4,
     /// `record` was called while the contract is paused.
     ContractPaused = 5,
+    /// `detail` string passed to `record` exceeds [`MAX_DETAIL_LEN`] bytes.
+    DetailTooLong = 6,
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +355,11 @@ impl AuditLog {
         // Contract must be initialized before accepting entries.
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
+        }
+
+        // Reject oversized detail strings to cap per-entry storage cost.
+        if detail.len() > MAX_DETAIL_LEN {
+            return Err(Error::DetailTooLong);
         }
 
         // The source must authorize this invocation.
