@@ -218,7 +218,8 @@ implementation.
 
 ### `policy-engine`
 
-**Has upgrade path**: yes — `upgrade(admin, new_wasm_hash)`.
+**Has upgrade path**: yes — `propose_upgrade`, then `commit_upgrade` after
+the configured ledger delay; `cancel_upgrade` stops a pending upgrade.
 
 **Preferred recovery path**:
 1. Pause if possible.

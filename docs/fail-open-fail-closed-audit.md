@@ -267,6 +267,32 @@ instance lapses, the emergency short-circuit is silently disabled.
 
 ---
 
+## `denylist-gate` mutations and the optional audit-log
+
+`add_to_denylist` and `remove_from_denylist` append to an optional audit-log
+configured via `set_audit_log`. The audit write is **fail-open**: it is issued
+with `try_record`, and if it fails (the audit-log is paused, archived, or
+reverting) the denylist mutation still succeeds and the gate emits
+`AuditLogFailed { kind, subject }` instead.
+
+**Why**: the audit-log is an opt-in, non-critical component. Making it
+fail-closed would let a pause or archival of a *different* contract block the
+gate's own admin from adding a sanctioned address. Sanctions entries must
+remain writable during an audit-log incident.
+
+**Consequence**: a denylist change can land without a matching audit entry.
+Issuers who need every mutation recorded must watch for `AuditLogFailed`
+events and reconcile the missed entries (replay `DenyAdd` / `DenyRemove` events
+into the audit-log once it is restored). The `DenyAdd` / `DenyRemove` events are
+the authoritative record of denylist state changes; the audit-log is a
+secondary index.
+
+**Not configurable (yet)**: there is no `strict_audit` switch. Issuers who want
+fail-closed auditing must not configure an audit-log for now and must enforce
+recording off-chain.
+
+---
+
 ## Recommendations for issuers
 
 1. **Treat denylist entries as high-priority TTL maintenance targets.** Their

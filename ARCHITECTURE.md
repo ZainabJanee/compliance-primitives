@@ -58,7 +58,7 @@ workspace at the crate level.
 | `denylist-gate` | `check(address) -> bool` — is this address blocked? | consumer contracts, `compliance-aggregator`, `policy-engine` |
 | `allowlist-token` | Wraps a SEP-41 token; only forwards `transfer` between two allowlisted addresses | end users / wallets directly (it's the one primitive meant to sit in the call path itself, not be queried by another contract) |
 | `jurisdiction-flag` | `is_permitted_jurisdiction(address, allowed_codes) -> bool` | consumer contracts, `compliance-aggregator`, `policy-engine` |
-| `audit-log` | Append-only on-chain event trail: `record(source, kind, subject, detail)` | opt-in — a primitive that has been wired with `set_audit_log(admin, audit_log_id)` calls it after each mutating operation. Currently wired into `denylist-gate`'s design; not yet wired into `allowlist-token` or `jurisdiction-flag` |
+| `audit-log` | Append-only on-chain event trail: `record(source, kind, subject, detail)` | opt-in — a primitive that has been wired with `set_audit_log(admin, audit_log_id)` calls it after each mutating operation. Currently wired into `denylist-gate`'s design and `circuit-breaker`'s `freeze`/`unfreeze`; not yet wired into `allowlist-token` or `jurisdiction-flag` |
 
 `audit-log` is grouped with the primitives rather than the composition
 contracts because it doesn't aggregate *checks* — it's a standalone,

@@ -7,7 +7,7 @@ use circuit_breaker::{CircuitBreaker, CircuitBreakerClient as CbClient};
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{vec, Env, String};
+use soroban_sdk::{vec, BytesN, Env, String};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -205,6 +205,16 @@ fn test_add_and_remove_check() {
     // Remove the first check (index 0); list should shrink to 1.
     client.remove_check(&admin, &0);
     assert_eq!(client.get_checks().len(), 1);
+}
+
+#[test]
+fn test_remove_check_out_of_bounds_returns_contract_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+
+    let result = client.try_remove_check(&admin, &0u32);
+    assert_eq!(result, Err(Ok(Error::IndexOutOfBounds)));
 }
 
 #[test]
@@ -779,6 +789,47 @@ fn test_evaluate_verbose_fails_surfaces_check_failure() {
         soroban_sdk::Symbol::new(&env, "Denylist"),
         "kind should be 'Denylist'"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests for issue #628: timelocked upgrades
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_upgrade_requires_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _engine_id, client) = setup_engine_all(&env);
+    let impostor = Address::generate(&env);
+    let wasm_hash = BytesN::from_array(&env, &[1; 32]);
+
+    assert_eq!(
+        client.try_propose_upgrade(&impostor, &wasm_hash, &10),
+        Err(Ok(Error::NotAuthorized)),
+    );
+}
+
+#[test]
+fn test_upgrade_cannot_commit_before_delay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+    let wasm_hash = BytesN::from_array(&env, &[1; 32]);
+
+    client.propose_upgrade(&admin, &wasm_hash, &10);
+    assert_eq!(client.try_commit_upgrade(&admin), Err(Ok(Error::UpgradeNotReady)));
+}
+
+#[test]
+fn test_cancel_upgrade_clears_pending_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+    let wasm_hash = BytesN::from_array(&env, &[1; 32]);
+
+    client.propose_upgrade(&admin, &wasm_hash, &10);
+    client.cancel_upgrade(&admin);
+    assert_eq!(client.try_commit_upgrade(&admin), Err(Ok(Error::UpgradeNotReady)));
 }
 
 // ---------------------------------------------------------------------------

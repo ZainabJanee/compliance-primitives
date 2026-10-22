@@ -164,10 +164,13 @@ jobs:
         run: ./scripts/regenerate-docs.sh
       - name: Check for differences
         run: |
-          if git diff --exit-code docs/interfaces/ > /dev/null; then
+          # `git status --porcelain` also catches untracked files (e.g. a new
+          # contract whose interface was generated but never committed).
+          if [ -z "$(git status --porcelain docs/interfaces/)" ]; then
             echo "✓ docs/interfaces is up to date"
           else
             echo "✗ docs/interfaces is out of date. Run ./scripts/regenerate-docs.sh and commit the changes."
+            git status --porcelain docs/interfaces/
             git diff docs/interfaces/
             exit 1
           fi

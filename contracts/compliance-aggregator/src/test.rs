@@ -167,6 +167,17 @@ fn test_set_admin_rejects_non_admin() {
 }
 
 #[test]
+fn test_set_circuit_breaker_rejects_changes_while_paused() {
+    let env = Env::default();
+    let (_, _, _, _, admin, _, client) = setup_all(&env);
+    let breaker = Address::generate(&env);
+    client.pause(&admin);
+
+    let result = client.try_set_circuit_breaker(&admin, &breaker);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
 fn test_set_denylist_gate_rejects_non_admin() {
     let env = Env::default();
     let (_, _, _, _, _, _, client) = setup_all(&env);
@@ -822,16 +833,20 @@ fn test_circuit_breaker_freeze_short_circuits_check_address() {
     // Before freezing, the check passes normally.
     let (all_passed, checks) = client.check_address(&alice, &vec![&env]);
     assert!(all_passed);
-    assert_eq!(checks.len(), 1);
+    assert_eq!(checks.len(), 2);
+    assert_eq!(checks.get(0).unwrap().check, CheckKind::CircuitBreaker);
+    assert!(checks.get(0).unwrap().passed);
 
     // Freeze mid-flow.
-    breaker_client.freeze(&breaker_admin);
+    breaker_client.freeze(&breaker_admin, &None);
 
     // Now the same previously-passing check is denied without even
     // consulting the denylist-gate.
     let (all_passed, checks) = client.check_address(&alice, &vec![&env]);
     assert!(!all_passed);
-    assert!(checks.is_empty());
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks.get(0).unwrap().check, CheckKind::CircuitBreaker);
+    assert!(!checks.get(0).unwrap().passed);
 }
 
 #[test]
@@ -946,7 +961,7 @@ fn test_upgrade_preserves_state_and_remains_callable() {
     // And the contract is still callable after the upgrade.
     let (alice_ok, alice_checks) = client.check_address(&alice, &us_vec(&env));
     assert!(alice_ok);
-    assert_eq!(alice_checks.len(), 2);
+    assert_eq!(alice_checks.len(), 3);
     let (mallory_ok, _) = client.check_address(&mallory, &us_vec(&env));
     assert!(!mallory_ok);
 

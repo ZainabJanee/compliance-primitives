@@ -86,6 +86,7 @@ enum DataKey {
     DelegatedAdminPubKey,
     /// Last accepted delegated-action nonce for an admin. Persistent storage.
     DelegatedNonce(Address),
+    PendingUpgrade,
 }
 
 #[contractevent]
@@ -136,6 +137,17 @@ pub struct Metadata {
     pub admin: Address,
 }
 
+/// Delayed upgrade proposal state.
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeState {
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
+}
+
+/// Current on-chain schema version for this contract instance.
+pub const SCHEMA_VERSION: u32 = 1;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -153,6 +165,8 @@ pub enum Error {
     InvalidSignature = 9,
     InvalidNonce = 10,
     ExpiredSignature = 11,
+    /// `commit_upgrade` called with no pending upgrade, or before `activated_at`.
+    UpgradeNotReady = 12,
 }
 
 #[contract]
@@ -243,6 +257,9 @@ impl AllowlistToken {
         Self::require_configured_admin(&env, &admin)?;
 
         let now = env.ledger().timestamp();
+        // Strict comparison: `expiry == now` is already expired, so a zero
+        // expiry or one at the current ledger timestamp is rejected. Only
+        // `expiry > now` is accepted.
         if expiry <= now {
             return Err(Error::ExpiredSignature);
         }

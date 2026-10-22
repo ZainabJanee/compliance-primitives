@@ -1,17 +1,70 @@
 # Fuzz harnesses
 
-This repo uses **lightweight seeded-PRNG sequence fuzzers** inside each
-contract's `#[cfg(test)]` tree rather than a separate `cargo-fuzz` workspace.
+This repo has two fuzzing layers:
 
-## Why not cargo-fuzz / libFuzzer?
+1. **Seeded-PRNG sequence fuzzers** inside each contract's `#[cfg(test)]`
+   tree. They run on stable as part of `cargo test` and print the failing
+   `seed` for replay.
+2. **`cargo-fuzz` (libFuzzer) project** in this directory (`fuzz/`). It
+   drives the same denylist-gate and jurisdiction-flag invariants from raw
+   bytes, with coverage guidance. It needs nightly and is not part of the
+   root workspace or CI.
 
-Soroban contract tests need a host `Env`, `mock_all_auths`, and `Address`
-generation from `soroban-sdk` testutils. Wiring that through libFuzzer's
-byte-buffer `fuzz_target!` is possible but heavy for `#![no_std]` crates and
-duplicates most of the unit-test setup. A plain `#[test]` loop with a tiny
-xorshift PRNG covers the same last-write-wins invariants with zero extra
-toolchain deps, and the same scaffolding can be copied for denylist-gate
-(#86) and jurisdiction-flag (#87).
+## cargo-fuzz targets
+
+| Target                                         | Source harness                                                |
+| ---------------------------------------------- | ------------------------------------------------------------- |
+| `denylist_gate_sequences`                      | `contracts/denylist-gate/src/fuzz_test.rs` (`fuzz_denylist_sequences`) |
+| `jurisdiction_set_get_sequences`               | `contracts/jurisdiction-flag/src/fuzz.rs` (`fuzz_jurisdiction_set_get_sequences`) |
+| `jurisdiction_multicode_add_remove_sequences`  | `contracts/jurisdiction-flag/src/fuzz.rs` (`fuzz_jurisdiction_multicode_add_remove_sequences`) |
+
+Setup (once):
+
+```sh
+rustup toolchain install nightly
+cargo install cargo-fuzz
+```
+
+Run a target (from the repo root):
+
+```sh
+cargo +nightly fuzz run denylist_gate_sequences -- -runs=1000
+cargo +nightly fuzz run jurisdiction_set_get_sequences -- -runs=1000
+cargo +nightly fuzz run jurisdiction_multicode_add_remove_sequences -- -runs=1000
+```
+
+Run until stopped (no `-runs` limit) or add `-max_total_time=300` for a
+time-boxed campaign. Crashing inputs are written to `fuzz/artifacts/<target>/`;
+replay one with `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<file>`.
+Corpus lives in `fuzz/corpus/<target>/`.
+
+### Input encoding
+
+Each target reads the fuzz input as a sequence of fixed-width chunks, and
+each chunk is one contract operation. Chunks beyond the per-target op cap
+(64) are ignored. Empty input is a no-op.
+
+- `denylist_gate_sequences`: 2 bytes per op. `b0 % 3` = add / remove / check,
+  `b1 % 5` = address index.
+- `jurisdiction_set_get_sequences`: 2 bytes per op. `b0 % 5` = address index,
+  `b1 % 7` = code index. Calls `set_jurisdiction` only.
+- `jurisdiction_multicode_add_remove_sequences`: 2 bytes per op. `b0 % 7` =
+  code index, low bit of `b1` = add (0) / remove (1).
+
+### Extending a target
+
+1. Add the new operation as a byte-decoded arm in the target's loop, keeping
+   the chunk layout documented above (append bytes if you must change width,
+   and update this section).
+2. Mirror the operation in the model (`denied`, `model`, ...) and add an
+   assertion that the contract agrees with the model.
+3. Add a matching `[[bin]]` entry to `fuzz/Cargo.toml` for any new target,
+   and a row to the table above.
+4. Smoke-test with `cargo +nightly fuzz run <target> -- -runs=1000`.
+
+The fuzz crate depends on `denylist-gate` and `jurisdiction-flag` by path, so
+the contract's public client API is what gets exercised. The in-crate
+harnesses stay the place for cases that need private items.
 
 ## jurisdiction-flag (`#87`)
 
@@ -141,3 +194,30 @@ FUZZ_ITERATIONS=2000 FUZZ_OPS=64 \
 Run this after non-trivial changes to `transfer`, `is_allowed`,
 `add_to_allowlist`, or `remove_from_allowlist`, or as part of a release
 checklist.
+
+## compliance-aggregator (`#380`)
+
+Harness: `contracts/compliance-aggregator/src/fuzz.rs`
+
+Each iteration randomly registers the denylist-gate, the jurisdiction-flag, or
+both, applies a random sequence of denylist adds/removes and jurisdiction
+sets over a small address pool, then calls `check_all` on a random batch.
+
+Invariants checked for every returned `AddressCheckResult`:
+
+1. **all_passed consistency** — `all_passed` is `true` iff every individual
+   `CheckResult.passed` is `true`.
+2. **Shape** — one result per input address in input order, with one
+   `CheckResult` per registered check (denylist first, then jurisdiction).
+3. **Model agreement** — each `CheckResult.passed` matches the harness model
+   of the denylist / jurisdiction state.
+
+```sh
+cargo test -p compliance-aggregator fuzz_check_all_combinations -- --nocapture
+
+FUZZ_ITERATIONS=2000 FUZZ_OPS=64 \
+  cargo test -p compliance-aggregator fuzz_check_all_combinations -- --nocapture
+```
+
+Defaults: `FUZZ_ITERATIONS=128`, `FUZZ_OPS=24`. Failures print the failing
+`seed`.

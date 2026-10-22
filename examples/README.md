@@ -10,7 +10,7 @@ to find the right starting point for your use case.
 
 | Example | Primitives demonstrated | Composition pattern |
 | --- | --- | --- |
-| [`allowlist-token-usage`](./allowlist-token-usage) | `allowlist-token` | Shell script invoking `allowlist-token` via the Stellar CLI; shows the deploy → initialize → add-to-allowlist → transfer CLI round trip |
+| [`allowlist-token-usage`](./allowlist-token-usage) | `allowlist-token` | Shell script invoking `allowlist-token` via the Stellar CLI, plus a Rust `walkthrough()` driving the same lifecycle through a generated client |
 | [`circuit-breaker-policy-engine`](./circuit-breaker-policy-engine) | `circuit-breaker`, `policy-engine` | Circuit breaker checked as a fast-fail pre-guard before delegating to a `policy-engine` evaluation; shows priority ordering of emergency-stop vs. rule-based checks |
 | [`compliance-integration-flow`](./compliance-integration-flow) | `denylist-gate`, `jurisdiction-flag`, `compliance-aggregator`, `policy-engine` | End-to-end integration flow composing aggregator, policy-engine, and jurisdiction checks in a single contract |
 | [`denylist-gate-consumer`](./denylist-gate-consumer) | `denylist-gate`, `circuit-breaker` | Minimal token calling `denylist-gate.check` and `circuit-breaker.is_frozen` before every transfer; the simplest cross-contract composition pattern |
