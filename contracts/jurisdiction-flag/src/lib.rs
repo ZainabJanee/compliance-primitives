@@ -42,6 +42,11 @@ const TTL_THRESHOLD: u32 = 1_000;
 /// Target TTL (in ledgers) after extension.
 const TTL_EXTEND_TO: u32 = 5_000;
 
+/// Maximum number of entries accepted by `set_multiple_jurisdictions` in a
+/// single call. Keeps transaction costs bounded and prevents resource
+/// exhaustion.
+pub const MAX_BATCH_SIZE: u32 = 100;
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -276,6 +281,53 @@ impl JurisdictionFlag {
             code,
         }
         .publish(&env);
+        Ok(())
+    }
+
+    /// Batch-set jurisdiction codes for multiple addresses in one transaction.
+    ///
+    /// Behaves like calling [`set_jurisdiction`](Self::set_jurisdiction) once
+    /// per entry: each address's codes are replaced by the single given code
+    /// and any `valid_until` is cleared. `caller` must be the issuer or the
+    /// compliance officer. All codes are validated **before** any writes, so
+    /// one invalid code rejects the whole batch without leaving partial state.
+    ///
+    /// # Errors
+    /// [`Error::ContractPaused`] while the contract is paused;
+    /// [`Error::InvalidInput`] if `entries` is empty or longer than
+    /// [`MAX_BATCH_SIZE`]; [`Error::InvalidJurisdictionCode`] if any code is
+    /// malformed.
+    pub fn set_multiple_jurisdictions(
+        env: Env,
+        caller: Address,
+        entries: Vec<(Address, String)>,
+    ) -> Result<(), Error> {
+        Self::require_compliance_authority(&env, &caller)?;
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
+        if paused {
+            return Err(Error::ContractPaused);
+        }
+
+        if entries.is_empty() || entries.len() > MAX_BATCH_SIZE {
+            return Err(Error::InvalidInput);
+        }
+        for (_, code) in entries.iter() {
+            Self::validate_jurisdiction_code(&code)?;
+        }
+
+        for (address, code) in entries.iter() {
+            let mut codes = Vec::new(&env);
+            codes.push_back(code.clone());
+            Self::store_jurisdictions(&env, &address, &codes);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::ValidUntil(address.clone()));
+            JurisdictionSet { address, code }.publish(&env);
+        }
         Ok(())
     }
 

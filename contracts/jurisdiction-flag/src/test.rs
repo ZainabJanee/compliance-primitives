@@ -581,3 +581,145 @@ fn test_jurisdiction_expires_after_valid_until() {
     let allowed = vec![&env, String::from_str(&env, "US")];
     assert_eq!(client.is_permitted_jurisdiction(&alice, &allowed), false);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #604: set_multiple_jurisdictions batch setter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_multiple_jurisdictions_basic() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    let entries = vec![
+        &env,
+        (alice.clone(), String::from_str(&env, "US")),
+        (bob.clone(), String::from_str(&env, "CA")),
+    ];
+    client.set_multiple_jurisdictions(&issuer, &entries);
+
+    assert_eq!(
+        client.get_jurisdiction(&alice),
+        Some(String::from_str(&env, "US"))
+    );
+    assert_eq!(
+        client.get_jurisdiction(&bob),
+        Some(String::from_str(&env, "CA"))
+    );
+}
+
+#[test]
+fn test_set_multiple_jurisdictions_rejects_unauthorized_caller() {
+    let env = Env::default();
+    let (_issuer, _contract_id, client) = setup(&env);
+    let impostor = Address::generate(&env);
+    let alice = Address::generate(&env);
+
+    let entries = vec![
+        &env,
+        (alice.clone(), String::from_str(&env, "US")),
+    ];
+    let result = client.try_set_multiple_jurisdictions(&impostor, &entries);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+    assert_eq!(client.get_jurisdiction(&alice), None);
+}
+
+#[test]
+fn test_set_multiple_jurisdictions_one_invalid_code_rejects_whole_batch() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    // "us" is lowercase — invalid; the whole batch must be rejected.
+    let entries = vec![
+        &env,
+        (alice.clone(), String::from_str(&env, "US")),
+        (bob.clone(), String::from_str(&env, "us")),
+    ];
+    let result = client.try_set_multiple_jurisdictions(&issuer, &entries);
+    assert_eq!(result, Err(Ok(Error::InvalidJurisdictionCode)));
+
+    // Nothing should have been written.
+    assert_eq!(client.get_jurisdiction(&alice), None);
+    assert_eq!(client.get_jurisdiction(&bob), None);
+}
+
+#[test]
+fn test_set_multiple_jurisdictions_empty_batch_is_invalid() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+
+    let entries: Vec<(Address, String)> = vec![&env];
+    let result = client.try_set_multiple_jurisdictions(&issuer, &entries);
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_set_multiple_jurisdictions_over_cap_is_invalid() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+
+    // Build MAX_BATCH_SIZE + 1 entries.
+    let mut entries_vec = soroban_sdk::vec![&env];
+    for _ in 0..=super::MAX_BATCH_SIZE {
+        entries_vec.push_back((Address::generate(&env), String::from_str(&env, "US")));
+    }
+    let result = client.try_set_multiple_jurisdictions(&issuer, &entries_vec);
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_set_multiple_jurisdictions_compliance_officer_can_set() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let officer = Address::generate(&env);
+    let alice = Address::generate(&env);
+
+    client.set_compliance_officer(&issuer, &officer);
+
+    let entries = vec![
+        &env,
+        (alice.clone(), String::from_str(&env, "US")),
+    ];
+    client.set_multiple_jurisdictions(&officer, &entries);
+
+    assert_eq!(
+        client.get_jurisdiction(&alice),
+        Some(String::from_str(&env, "US"))
+    );
+}
+
+#[test]
+fn test_set_multiple_jurisdictions_paused_contract_is_rejected() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    client.pause(&issuer);
+
+    let entries = vec![
+        &env,
+        (alice.clone(), String::from_str(&env, "US")),
+    ];
+    let result = client.try_set_multiple_jurisdictions(&issuer, &entries);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+    assert_eq!(client.get_jurisdiction(&alice), None);
+}
+
+#[test]
+fn test_set_multiple_jurisdictions_empty_code_is_invalid() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    let entries = vec![
+        &env,
+        (alice.clone(), String::from_str(&env, "")),
+    ];
+    let result = client.try_set_multiple_jurisdictions(&issuer, &entries);
+    assert_eq!(result, Err(Ok(Error::InvalidJurisdictionCode)));
+    assert_eq!(client.get_jurisdiction(&alice), None);
+}
