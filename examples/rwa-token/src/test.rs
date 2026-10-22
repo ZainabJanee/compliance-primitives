@@ -1,5 +1,6 @@
 use super::*;
 use allowlist_token::{AllowlistToken, AllowlistTokenClient};
+use circuit_breaker::{CircuitBreaker, CircuitBreakerClient};
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
 use soroban_sdk::testutils::Address as _;
@@ -11,6 +12,8 @@ struct Fixture<'a> {
     allowlist_id: Address,
     gate_id: Address,
     jurisdiction_id: Address,
+    breaker_id: Address,
+    breaker_admin: Address,
     token: RwaTokenClient<'a>,
 }
 
@@ -18,6 +21,7 @@ fn setup(env: &Env) -> Fixture<'_> {
     env.mock_all_auths();
     let admin = Address::generate(env);
     let issuer = Address::generate(env);
+    let breaker_admin = Address::generate(env);
 
     // Underlying SEP-41 placeholder — rwa-token only uses is_allowed().
     let underlying = Address::generate(env);
@@ -30,6 +34,9 @@ fn setup(env: &Env) -> Fixture<'_> {
     let jurisdiction_id = env.register(JurisdictionFlag, ());
     JurisdictionFlagClient::new(env, &jurisdiction_id).initialize(&issuer);
 
+    let breaker_id = env.register(CircuitBreaker, ());
+    CircuitBreakerClient::new(env, &breaker_id).initialize(&breaker_admin);
+
     let allowed_codes = vec![
         env,
         String::from_str(env, "US"),
@@ -37,7 +44,13 @@ fn setup(env: &Env) -> Fixture<'_> {
     ];
     let token_id = env.register(RwaToken, ());
     let token = RwaTokenClient::new(env, &token_id);
-    token.initialize(&allowlist_id, &gate_id, &jurisdiction_id, &allowed_codes);
+    token.initialize(
+        &allowlist_id,
+        &gate_id,
+        &jurisdiction_id,
+        &breaker_id,
+        &allowed_codes,
+    );
 
     Fixture {
         admin,
@@ -45,12 +58,14 @@ fn setup(env: &Env) -> Fixture<'_> {
         allowlist_id,
         gate_id,
         jurisdiction_id,
+        breaker_id,
+        breaker_admin,
         token,
     }
 }
 
 fn onboard(env: &Env, fx: &Fixture<'_>, who: &Address, code: &str) {
-    AllowlistTokenClient::new(env, &fx.allowlist_id).add_to_allowlist(&fx.admin, who);
+    AllowlistTokenClient::new(env, &fx.allowlist_id).add_to_allowlist(&fx.admin, who, &None);
     JurisdictionFlagClient::new(env, &fx.jurisdiction_id).set_jurisdiction(
         &fx.issuer,
         who,
@@ -119,7 +134,7 @@ fn test_transfer_blocked_when_jurisdiction_not_permitted() {
     let bob = Address::generate(&env);
     onboard(&env, &fx, &alice, "US");
     // Bob allowlisted but flagged IR, which is outside allowed_codes (US, CA).
-    AllowlistTokenClient::new(&env, &fx.allowlist_id).add_to_allowlist(&fx.admin, &bob);
+    AllowlistTokenClient::new(&env, &fx.allowlist_id).add_to_allowlist(&fx.admin, &bob, &None);
     JurisdictionFlagClient::new(&env, &fx.jurisdiction_id).set_jurisdiction(
         &fx.issuer,
         &bob,
@@ -130,4 +145,24 @@ fn test_transfer_blocked_when_jurisdiction_not_permitted() {
     let result = fx.token.try_transfer(&alice, &bob, &400);
     assert_eq!(result, Err(Ok(Error::JurisdictionNotPermitted)));
     assert_eq!(fx.token.balance(&alice), 1_000);
+}
+
+#[test]
+fn test_transfer_blocked_when_circuit_breaker_frozen() {
+    let env = Env::default();
+    let fx = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    onboard(&env, &fx, &alice, "US");
+    onboard(&env, &fx, &bob, "CA");
+
+    // Freeze the circuit breaker — all transfers must halt immediately.
+    CircuitBreakerClient::new(&env, &fx.breaker_id).freeze(&fx.breaker_admin, &None);
+
+    fx.token.mint(&alice, &1_000);
+    let result = fx.token.try_transfer(&alice, &bob, &400);
+    assert_eq!(result, Err(Ok(Error::CircuitBreakerFrozen)));
+    // Balance unchanged — transfer was blocked.
+    assert_eq!(fx.token.balance(&alice), 1_000);
+    assert_eq!(fx.token.balance(&bob), 0);
 }

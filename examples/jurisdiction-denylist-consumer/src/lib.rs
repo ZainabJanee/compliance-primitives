@@ -119,7 +119,11 @@ impl JurisdictionDenylistConsumer {
         }
 
         let jurisdiction = JurisdictionFlagClient::new(&env, &jurisdiction_address);
-        if !jurisdiction.is_permitted_jurisdiction(&from, &allowed_jurisdictions) {
+        let permitted = matches!(
+            jurisdiction.try_is_permitted_jurisdiction(&from, &allowed_jurisdictions),
+            Ok(Ok(true))
+        );
+        if !permitted {
             return Err(Error::DeniedByJurisdiction);
         }
 

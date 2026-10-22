@@ -15,6 +15,10 @@
 <meta name="twitter:description" content="Auditable Soroban contracts for composable on-chain compliance.">
 <meta name="twitter:image" content="architecture.svg">
 <link rel="stylesheet" href="styles.css">
+<link rel="alternate" type="application/atom+xml" title="compliance-primitives changelog" href="feed.xml">
+<!-- Highlight.js — syntax highlighting for Rust/shell code blocks -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.10.0/styles/github.min.css" id="hljs-light-theme">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.10.0/styles/github-dark.min.css" id="hljs-dark-theme" disabled>
 </head>
 <body>
 
@@ -24,12 +28,15 @@
     <div class="nav-actions">
       <div class="nav-links" id="site-nav">
         <a href="#contracts">Contracts</a>
+        <a href="#comparison">Comparison</a>
+        <a href="#contract-lookup">Lookup</a>
         <a href="#architecture">Architecture</a>
         <a href="architecture.html">Diagram</a>
         <a href="changelog.html">Changelog</a>
         <a href="#quick-start">Quick start</a>
         <a href="interfaces.html">Interfaces</a>
         <a href="playground.html">Playground</a>
+        <a href="status.html">Status</a>
         <a href="https://github.com/stellar-compliance-kit/compliance-primitives">GitHub</a>
       </div>
       <button class="theme-toggle" type="button" aria-pressed="false" aria-label="Use dark mode">Dark mode</button>
@@ -89,9 +96,10 @@
         <span class="tag">admin-managed</span>
         <span class="tag">wraps SEP-41</span>
         <div class="fns">
-          <code>add_to_allowlist(admin, address)</code>
+          <code>add_to_allowlist(admin, address, expiration_ledger)</code>
           <code>is_allowed(address) -&gt; bool</code>
           <code>transfer(from, to, amount) -&gt; bool</code>
+          <a class="interface-link" href="interfaces.html#allowlist-token">Interface spec &rarr;</a>
         </div>
       </div>
       <div class="card" data-search-item>
@@ -106,6 +114,7 @@
         <div class="fns">
           <code>add_to_denylist(admin, address)</code>
           <code>check(address) -&gt; bool</code>
+          <a class="interface-link" href="interfaces.html#denylist-gate">Interface spec &rarr;</a>
         </div>
       </div>
       <div class="card" data-search-item>
@@ -120,15 +129,127 @@
         <div class="fns">
           <code>set_jurisdiction(issuer, address, code)</code>
           <code>is_permitted_jurisdiction(address, allowed_codes) -&gt; bool</code>
+          <a class="interface-link" href="interfaces.html#jurisdiction-flag">Interface spec &rarr;</a>
         </div>
       </div>
-      <div class="card" data-search-item><h3>audit-log</h3><p>Records compliance decisions and operational events for auditability.</p><span class="tag">auditable</span><div class="fns"><code>record_event(admin, subject, decision)</code></div></div>
-      <div class="card" data-search-item><h3>circuit-breaker</h3><p>Provides an emergency stop when automated or governance-defined conditions are met.</p><span class="tag">emergency control</span><div class="fns"><code>trip(admin)</code><code>is_tripped() -&gt; bool</code></div></div>
-      <div class="card" data-search-item><h3>compliance-aggregator</h3><p>Combines multiple compliance checks into one composable decision point.</p><span class="tag">composition</span><div class="fns"><code>check(address) -&gt; bool</code></div></div>
-      <div class="card" data-search-item><h3>multisig-admin</h3><p>Protects administrative operations with multi-signature approval.</p><span class="tag">governance</span><div class="fns"><code>approve(operation)</code><code>execute(operation)</code></div></div>
-      <div class="card" data-search-item><h3>pausable</h3><p>Exposes a controlled pause state for contracts that need operational safety controls.</p><span class="tag">emergency control</span><div class="fns"><code>pause(admin)</code><code>unpause(admin)</code></div></div>
-      <div class="card" data-search-item><h3>policy-engine</h3><p>Evaluates configurable policy rules before an application permits a transfer.</p><span class="tag">rules</span><div class="fns"><code>evaluate(subject, action) -&gt; bool</code></div></div>
+      <div class="card" data-search-item><h3>audit-log</h3><p>Records compliance decisions and operational events for auditability.</p><span class="tag">auditable</span><div class="fns"><code>record_event(admin, subject, decision)</code><a class="interface-link" href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/audit-log.md">Interface spec &rarr;</a></div></div>
+      <div class="card" data-search-item><h3>circuit-breaker</h3><p>Provides an emergency stop when automated or governance-defined conditions are met.</p><span class="tag">emergency control</span><div class="fns"><code>trip(admin)</code><code>is_tripped() -&gt; bool</code><a class="interface-link" href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/circuit-breaker.md">Interface spec &rarr;</a></div></div>
+      <div class="card" data-search-item><h3>compliance-aggregator</h3><p>Combines multiple compliance checks into one composable decision point.</p><span class="tag">composition</span><div class="fns"><code>check(address) -&gt; bool</code><a class="interface-link" href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/compliance-aggregator.md">Interface spec &rarr;</a></div></div>
+      <div class="card" data-search-item><h3>multisig-admin</h3><p>Protects administrative operations with multi-signature approval.</p><span class="tag">governance</span><div class="fns"><code>approve(operation)</code><code>execute(operation)</code><a class="interface-link" href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/multisig-admin.md">Interface spec &rarr;</a></div></div>
+      <div class="card" data-search-item><h3>pausable</h3><p>Exposes a controlled pause state for contracts that need operational safety controls.</p><span class="tag">emergency control</span><div class="fns"><code>pause(admin)</code><code>unpause(admin)</code><a class="interface-link" href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/pausable.md">Interface spec &rarr;</a></div></div>
+      <div class="card" data-search-item><h3>policy-engine</h3><p>Evaluates configurable policy rules before an application permits a transfer.</p><span class="tag">rules</span><div class="fns"><code>evaluate(subject, action) -&gt; bool</code><a class="interface-link" href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/policy-engine.md">Interface spec &rarr;</a></div></div>
     </div>
+  </div>
+</section>
+
+<section id="comparison">
+  <div class="wrap">
+    <h2>Comparison table</h2>
+    <p>
+      A side-by-side view of the nine contracts' key properties to help you
+      pick the right primitives for your use case.
+    </p>
+    <div class="cmp-table-wrap" tabindex="0" role="region" aria-label="Comparison table of nine contracts">
+      <table class="cmp-table">
+        <thead>
+          <tr>
+            <th scope="col">Contract</th>
+            <th scope="col">Composable</th>
+            <th scope="col">Standalone token</th>
+            <th scope="col">Upgradeable</th>
+            <th scope="col">Pausable</th>
+            <th scope="col">Compliance-officer role</th>
+            <th scope="col">Audit-log hook</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><a href="#contracts">allowlist-token</a></th>
+            <td class="cmp-no"  aria-label="Not composable">—</td>
+            <td class="cmp-yes" aria-label="Yes, standalone token">✓</td>
+            <td class="cmp-no"  aria-label="No upgrade path">—</td>
+            <td class="cmp-yes" aria-label="Yes, pausable">✓</td>
+            <td class="cmp-yes" aria-label="Yes, admin role">✓</td>
+            <td class="cmp-no"  aria-label="No audit-log hook">—</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="#contracts">denylist-gate</a></th>
+            <td class="cmp-yes" aria-label="Yes, composable">✓</td>
+            <td class="cmp-no"  aria-label="Not a standalone token">—</td>
+            <td class="cmp-no"  aria-label="No upgrade path">—</td>
+            <td class="cmp-no"  aria-label="Not pausable">—</td>
+            <td class="cmp-yes" aria-label="Yes, admin role">✓</td>
+            <td class="cmp-no"  aria-label="No audit-log hook">—</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="#contracts">jurisdiction-flag</a></th>
+            <td class="cmp-yes" aria-label="Yes, composable">✓</td>
+            <td class="cmp-no"  aria-label="Not a standalone token">—</td>
+            <td class="cmp-yes" aria-label="Yes, upgradeable">✓</td>
+            <td class="cmp-no"  aria-label="Not pausable">—</td>
+            <td class="cmp-yes" aria-label="Yes, issuer role">✓</td>
+            <td class="cmp-no"  aria-label="No audit-log hook">—</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="#contracts">audit-log</a></th>
+            <td class="cmp-yes" aria-label="Yes, composable">✓</td>
+            <td class="cmp-no"  aria-label="Not a standalone token">—</td>
+            <td class="cmp-no"  aria-label="No upgrade path">—</td>
+            <td class="cmp-no"  aria-label="Not pausable">—</td>
+            <td class="cmp-yes" aria-label="Yes, admin role">✓</td>
+            <td class="cmp-yes" aria-label="Yes, is the audit-log">✓</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="#contracts">circuit-breaker</a></th>
+            <td class="cmp-yes" aria-label="Yes, composable">✓</td>
+            <td class="cmp-no"  aria-label="Not a standalone token">—</td>
+            <td class="cmp-no"  aria-label="No upgrade path">—</td>
+            <td class="cmp-yes" aria-label="Yes, trip/reset acts as pause">✓</td>
+            <td class="cmp-yes" aria-label="Yes, admin role">✓</td>
+            <td class="cmp-no"  aria-label="No audit-log hook">—</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="#contracts">compliance-aggregator</a></th>
+            <td class="cmp-yes" aria-label="Yes, composable">✓</td>
+            <td class="cmp-no"  aria-label="Not a standalone token">—</td>
+            <td class="cmp-no"  aria-label="No upgrade path">—</td>
+            <td class="cmp-no"  aria-label="Not pausable">—</td>
+            <td class="cmp-yes" aria-label="Yes, admin role">✓</td>
+            <td class="cmp-no"  aria-label="No audit-log hook">—</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="#contracts">multisig-admin</a></th>
+            <td class="cmp-yes" aria-label="Yes, composable as admin">✓</td>
+            <td class="cmp-no"  aria-label="Not a standalone token">—</td>
+            <td class="cmp-no"  aria-label="No upgrade path">—</td>
+            <td class="cmp-no"  aria-label="Not pausable">—</td>
+            <td class="cmp-yes" aria-label="Yes, M-of-N signers">✓</td>
+            <td class="cmp-no"  aria-label="No audit-log hook">—</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="#contracts">pausable</a></th>
+            <td class="cmp-yes" aria-label="Yes, composable library">✓</td>
+            <td class="cmp-no"  aria-label="Not a standalone token">—</td>
+            <td class="cmp-no"  aria-label="No upgrade path">—</td>
+            <td class="cmp-yes" aria-label="Yes, is the pause primitive">✓</td>
+            <td class="cmp-yes" aria-label="Yes, admin role">✓</td>
+            <td class="cmp-no"  aria-label="No audit-log hook">—</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="#contracts">policy-engine</a></th>
+            <td class="cmp-yes" aria-label="Yes, composable">✓</td>
+            <td class="cmp-no"  aria-label="Not a standalone token">—</td>
+            <td class="cmp-no"  aria-label="No upgrade path">—</td>
+            <td class="cmp-no"  aria-label="Not pausable">—</td>
+            <td class="cmp-yes" aria-label="Yes, admin role">✓</td>
+            <td class="cmp-yes" aria-label="Yes, emits compliance events">✓</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cmp-legend">
+      ✓ = supported &nbsp;|&nbsp; — = not applicable / not present
+    </p>
   </div>
 </section>
 
@@ -161,28 +282,67 @@
   </div>
 </section>
 
+<section id="contract-lookup">
+  <div class="wrap">
+    <h2>Live contract lookup</h2>
+    <p>
+      Paste a testnet contract ID and an address to query its current
+      compliance state directly from your browser — no backend required.
+      Uses the Soroban RPC endpoint for Stellar Testnet.
+    </p>
+    <div class="lookup-form">
+      <div class="lookup-row">
+        <label class="lookup-label" for="lookup-contract-id">Contract ID <span class="lookup-hint">(C…)</span></label>
+        <input id="lookup-contract-id" class="lookup-input" type="text"
+               placeholder="CABC…XYZ" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="lookup-row">
+        <label class="lookup-label" for="lookup-address">Address to check <span class="lookup-hint">(G…)</span></label>
+        <input id="lookup-address" class="lookup-input" type="text"
+               placeholder="GABC…XYZ" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="lookup-row lookup-row--actions">
+        <button id="lookup-check-btn" class="btn btn-primary" type="button">Check address</button>
+        <button id="lookup-is-allowed-btn" class="btn btn-secondary" type="button">is_allowed?</button>
+        <button id="lookup-is-tripped-btn" class="btn btn-secondary" type="button">is_tripped?</button>
+      </div>
+    </div>
+    <div id="lookup-result" class="lookup-result" hidden aria-live="polite" aria-atomic="true">
+      <pre id="lookup-result-pre" class="lookup-result-pre"></pre>
+    </div>
+    <p class="lookup-note">
+      Queries are read-only <code>simulateTransaction</code> calls to
+      <a href="https://developers.stellar.org/docs/data/rpc" target="_blank" rel="noopener">Soroban RPC</a>
+      on Stellar Testnet. No wallet required.
+    </p>
+  </div>
+</section>
+
 <section id="quick-start">
   <div class="wrap">
     <h2>Quick start</h2>
-    <pre class="code" tabindex="0" role="region" aria-label="Quick start shell commands"><span class="comment"># Clone</span>
+    <div class="code-wrap">
+    <button class="copy-btn" type="button" aria-label="Copy code to clipboard">Copy</button>
+    <pre class="code" tabindex="0" role="region" aria-label="Quick start shell commands"><code class="language-bash"># Clone
 git clone https://github.com/stellar-compliance-kit/compliance-primitives.git
 cd compliance-primitives
 
-<span class="comment"># Run the full test suite (all three contracts + example)</span>
+# Run the full test suite (all three contracts + example)
 cargo test --workspace
 
-<span class="comment"># Lint</span>
+# Lint
 cargo clippy --workspace --all-targets -- -D warnings
 
-<span class="comment"># Build a contract to wasm (requires the wasm32v1-none target:
-# rustup target add wasm32v1-none)</span>
+# Build a contract to wasm (requires the wasm32v1-none target:
+# rustup target add wasm32v1-none)
 stellar contract build
 
-<span class="comment"># Deploy a built contract to testnet, e.g. denylist-gate</span>
+# Deploy a built contract to testnet, e.g. denylist-gate
 stellar contract deploy \
   --wasm target/wasm32v1-none/release/denylist_gate.wasm \
   --source &lt;your-testnet-identity&gt; \
-  --network testnet</pre>
+  --network testnet</code></pre>
+    </div>
   </div>
 </section>
 </main>
@@ -202,7 +362,11 @@ stellar contract deploy \
   </div>
 </footer>
 <script src="app.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.10.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.10.0/languages/rust.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.10.0/languages/bash.min.js"></script>
 <script>
+  // ── Theme + menu toggle ───────────────────────────────────────────────────
   (() => {
     const root = document.documentElement;
     const themeToggle = document.querySelector('.theme-toggle');
@@ -210,11 +374,18 @@ stellar contract deploy \
     const nav = document.querySelector('#site-nav');
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'light' || savedTheme === 'dark') root.dataset.theme = savedTheme;
+    const lightTheme = document.getElementById('hljs-light-theme');
+    const darkTheme  = document.getElementById('hljs-dark-theme');
+    const applyHljsTheme = (dark) => {
+      if (lightTheme) lightTheme.disabled = dark;
+      if (darkTheme)  darkTheme.disabled  = !dark;
+    };
     const updateTheme = () => {
       const dark = root.dataset.theme === 'dark' || (!root.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
       themeToggle.textContent = dark ? 'Light mode' : 'Dark mode';
       themeToggle.setAttribute('aria-label', dark ? 'Use light mode' : 'Use dark mode');
       themeToggle.setAttribute('aria-pressed', String(dark));
+      applyHljsTheme(dark);
     };
     themeToggle.addEventListener('click', () => {
       const dark = root.dataset.theme === 'dark' || (!root.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
@@ -227,6 +398,183 @@ stellar contract deploy \
       menuToggle.setAttribute('aria-expanded', String(open));
     });
     updateTheme();
+    if (typeof hljs !== 'undefined') hljs.highlightAll();
+  })();
+</script>
+<script>
+  // ── Live contract-lookup widget (#428) ───────────────────────────────────
+  (() => {
+    const TESTNET_RPC = 'https://soroban-testnet.stellar.org';
+    const NETWORK_PASSPHRASE = 'Test SDF Network ; September 2015';
+
+    const contractInput  = document.getElementById('lookup-contract-id');
+    const addressInput   = document.getElementById('lookup-address');
+    const checkBtn       = document.getElementById('lookup-check-btn');
+    const isAllowedBtn   = document.getElementById('lookup-is-allowed-btn');
+    const isTrippedBtn   = document.getElementById('lookup-is-tripped-btn');
+    const resultBox      = document.getElementById('lookup-result');
+    const resultPre      = document.getElementById('lookup-result-pre');
+
+    // XDR helpers — encode a minimal invokeHostFunction transaction for
+    // simulateTransaction. We use only the Stellar base library loaded from CDN.
+    // For simplicity we encode the address as an ScVal AccountId / Contract.
+
+    function showResult(text, isError) {
+      resultPre.textContent = text;
+      resultBox.hidden = false;
+      resultBox.className = 'lookup-result' + (isError ? ' lookup-result--error' : ' lookup-result--ok');
+    }
+
+    function getInputs() {
+      const contractId = contractInput.value.trim();
+      const address    = addressInput.value.trim();
+      if (!contractId) { showResult('Please enter a Contract ID.', true); return null; }
+      return { contractId, address };
+    }
+
+    /**
+     * Call a read-only contract function via simulateTransaction.
+     * We use the Soroban RPC simulateTransaction JSON-RPC method, passing
+     * a base64-XDR InvokeHostFunctionOperation built with stellar-sdk (loaded
+     * from CDN). Falls back to a raw JSON-RPC call if stellar-sdk isn't loaded.
+     */
+    async function simulateCall(contractId, functionName, args) {
+      // Build the request body for simulateTransaction using the
+      // stellar-sdk StellarSdk if available, otherwise call getContractData
+      // as a simple read-only fallback.
+      const payload = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'simulateTransaction',
+        params: {
+          transaction: buildSimpleTxXdr(contractId, functionName, args),
+        },
+      };
+
+      const resp = await fetch(TESTNET_RPC, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error(`RPC HTTP ${resp.status}`);
+      const json = await resp.json();
+      if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
+      return json.result;
+    }
+
+    /**
+     * Build a minimal base64-XDR InvokeHostFunctionTransaction suitable for
+     * simulateTransaction without needing the full stellar-sdk.
+     *
+     * Strategy: use stellar-sdk from a CDN script tag if it's present,
+     * otherwise surface a helpful error guiding the user.
+     */
+    function buildSimpleTxXdr(contractId, functionName, scValArgs) {
+      if (typeof StellarSdk === 'undefined') {
+        throw new Error(
+          'stellar-sdk is not loaded. This widget requires the Stellar SDK.\n' +
+          'Please open this page via a local server or the deployed site.'
+        );
+      }
+      const account = new StellarSdk.Account(
+        'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', // dummy source
+        '0'
+      );
+      const contract = new StellarSdk.Contract(contractId);
+      const tx = new StellarSdk.TransactionBuilder(account, {
+        fee: '100',
+        networkPassphrase: NETWORK_PASSPHRASE,
+      })
+        .addOperation(contract.call(functionName, ...scValArgs))
+        .setTimeout(30)
+        .build();
+      return tx.toEnvelope().toXDR('base64');
+    }
+
+    function addressToScVal(addr) {
+      if (typeof StellarSdk === 'undefined') return null;
+      // G… addresses are Stellar accounts, C… are contract addresses
+      if (addr.startsWith('G')) {
+        return StellarSdk.nativeToScVal(StellarSdk.Address.fromString(addr), { type: 'address' });
+      }
+      return StellarSdk.nativeToScVal(StellarSdk.Address.fromString(addr), { type: 'address' });
+    }
+
+    function formatResult(fnName, result) {
+      if (!result) return `${fnName}() → (no result)`;
+      if (result.results && result.results[0]) {
+        const xdr = result.results[0].xdr;
+        if (typeof StellarSdk !== 'undefined') {
+          try {
+            const scVal = StellarSdk.xdr.ScVal.fromXDR(xdr, 'base64');
+            const native = StellarSdk.scValToNative(scVal);
+            return `${fnName}() → ${JSON.stringify(native, null, 2)}`;
+          } catch (_) { /* fall through */ }
+        }
+        return `${fnName}() → (raw XDR) ${xdr}`;
+      }
+      if (result.error) return `${fnName}() → error: ${result.error}`;
+      return `${fnName}() → ${JSON.stringify(result, null, 2)}`;
+    }
+
+    // ── Button handlers ────────────────────────────────────────────────────
+
+    checkBtn.addEventListener('click', async () => {
+      const inputs = getInputs();
+      if (!inputs) return;
+      const { contractId, address } = inputs;
+      if (!address) { showResult('Please enter an address to check.', true); return; }
+      checkBtn.disabled = true;
+      checkBtn.textContent = 'Checking…';
+      try {
+        const scAddr = addressToScVal(address);
+        if (!scAddr) throw new Error('stellar-sdk not available — cannot encode address.');
+        const result = await simulateCall(contractId, 'check', [scAddr]);
+        showResult(formatResult('check', result), false);
+      } catch (err) {
+        showResult(`Error: ${err.message}`, true);
+      } finally {
+        checkBtn.disabled = false;
+        checkBtn.textContent = 'Check address';
+      }
+    });
+
+    isAllowedBtn.addEventListener('click', async () => {
+      const inputs = getInputs();
+      if (!inputs) return;
+      const { contractId, address } = inputs;
+      if (!address) { showResult('Please enter an address to check.', true); return; }
+      isAllowedBtn.disabled = true;
+      isAllowedBtn.textContent = 'Querying…';
+      try {
+        const scAddr = addressToScVal(address);
+        if (!scAddr) throw new Error('stellar-sdk not available — cannot encode address.');
+        const result = await simulateCall(contractId, 'is_allowed', [scAddr]);
+        showResult(formatResult('is_allowed', result), false);
+      } catch (err) {
+        showResult(`Error: ${err.message}`, true);
+      } finally {
+        isAllowedBtn.disabled = false;
+        isAllowedBtn.textContent = 'is_allowed?';
+      }
+    });
+
+    isTrippedBtn.addEventListener('click', async () => {
+      const inputs = getInputs();
+      if (!inputs) return;
+      const { contractId } = inputs;
+      isTrippedBtn.disabled = true;
+      isTrippedBtn.textContent = 'Querying…';
+      try {
+        const result = await simulateCall(contractId, 'is_tripped', []);
+        showResult(formatResult('is_tripped', result), false);
+      } catch (err) {
+        showResult(`Error: ${err.message}`, true);
+      } finally {
+        isTrippedBtn.disabled = false;
+        isTrippedBtn.textContent = 'is_tripped?';
+      }
+    });
   })();
 </script>
 </body>

@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Testnet Status — compliance-primitives</title>
+<meta name="description" content="Live testnet deployment status for compliance-primitives contracts, showing indexer health and latest indexed ledger.">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<style>
+  .status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-top: 24px;
+  }
+  .status-card {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    background: var(--bg-raised);
+  }
+  .status-card h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .status-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .status-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+    background: var(--border);
+    vertical-align: middle;
+  }
+  .status-dot[data-state="ok"]      { background: #2da44e; }
+  .status-dot[data-state="error"]   { background: #cf222e; }
+  .status-dot[data-state="loading"] { background: #bf8700; animation: pulse 1.2s infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.35; }
+  }
+  .status-label {
+    font-size: 15px;
+    font-weight: 600;
+    vertical-align: middle;
+  }
+  .status-meta {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .refresh-btn {
+    margin-top: 20px;
+    padding: 8px 14px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-raised);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .notice {
+    margin-top: 24px;
+    padding: 14px 18px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 13px;
+    color: var(--text-dim);
+    background: var(--bg-raised);
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="index.html">compliance-primitives</a>
+    <div class="nav-actions">
+      <div class="nav-links" id="site-nav">
+        <a href="index.html#contracts">Contracts</a>
+        <a href="index.html#architecture">Architecture</a>
+        <a href="architecture.html">Diagram</a>
+        <a href="changelog.html">Changelog</a>
+        <a href="index.html#quick-start">Quick start</a>
+        <a href="interfaces.html">Interfaces</a>
+        <a href="playground.html">Playground</a>
+        <a href="https://github.com/stellar-compliance-kit/compliance-primitives">GitHub</a>
+      </div>
+      <button class="theme-toggle" type="button" aria-pressed="false" aria-label="Use dark mode">Dark mode</button>
+      <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    </div>
+  </div>
+</nav>
+
+<main class="page">
+  <div class="wrap">
+    <h1>Testnet deployment status</h1>
+    <p style="color:var(--text-dim);max-width:680px;margin:0 0 8px">
+      Live health of the reference testnet deployment, polled from the
+      compliance-primitives indexer. Refresh interval: 30 s.
+    </p>
+
+    <div class="status-grid" id="status-grid" aria-live="polite" aria-label="Testnet status">
+      <div class="status-card">
+        <h3>Indexer</h3>
+        <div>
+          <span class="status-dot" id="dot-indexer" data-state="loading"></span>
+          <span class="status-label" id="label-indexer">Checking…</span>
+        </div>
+        <p class="status-meta" id="meta-indexer"></p>
+      </div>
+      <div class="status-card">
+        <h3>Latest indexed ledger</h3>
+        <div class="status-value" id="ledger-height">—</div>
+        <p class="status-meta" id="meta-ledger"></p>
+      </div>
+      <div class="status-card">
+        <h3>Last checked</h3>
+        <div class="status-value" id="last-checked" style="font-size:14px;padding-top:4px">—</div>
+        <p class="status-meta">auto-refreshes every 30 s</p>
+      </div>
+    </div>
+
+    <button class="refresh-btn" id="refresh-btn" type="button">Refresh now</button>
+
+    <p class="notice">
+      <strong>Note:</strong> This page depends on the indexer health-check endpoint
+      (<a href="https://github.com/stellar-compliance-kit/compliance-primitives/issues/432">#432 upstream issue</a>).
+      The endpoint URL below is a placeholder — update
+      <code>INDEXER_STATUS_URL</code> in <code>web/status.html</code> once the
+      endpoint is live.
+    </p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-row">
+      <span>MIT License &middot; part of the Drips Wave Stellar Program</span>
+      <span>
+        <a href="https://github.com/stellar-compliance-kit/compliance-primitives">GitHub</a>
+        &middot;
+        <a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/CONTRIBUTING.md">Contributing</a>
+        &middot;
+        <a href="https://github.com/stellar-compliance-kit/compliance-primitives/actions/workflows/ci.yml">CI</a>
+      </span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  (() => {
+    // ----------------------------------------------------------------
+    // Update INDEXER_STATUS_URL once tools/indexer exposes a /status or
+    // /health endpoint (see upstream issue #432).
+    // ----------------------------------------------------------------
+    const INDEXER_STATUS_URL = 'https://indexer.compliance-primitives.testnet.example/status';
+    const POLL_INTERVAL_MS   = 30_000;
+
+    const dotEl      = document.getElementById('dot-indexer');
+    const labelEl    = document.getElementById('label-indexer');
+    const metaEl     = document.getElementById('meta-indexer');
+    const ledgerEl   = document.getElementById('ledger-height');
+    const metaLedger = document.getElementById('meta-ledger');
+    const lastEl     = document.getElementById('last-checked');
+
+    function setLoading() {
+      dotEl.dataset.state  = 'loading';
+      labelEl.textContent  = 'Checking…';
+      metaEl.textContent   = '';
+    }
+
+    function renderOk(data) {
+      dotEl.dataset.state  = 'ok';
+      labelEl.textContent  = 'Online';
+      metaEl.textContent   = data.version ? `v${data.version}` : '';
+      ledgerEl.textContent = data.ledger_height ?? data.latest_ledger ?? '—';
+      metaLedger.textContent = data.ledger_close_time
+        ? `closed ${new Date(data.ledger_close_time).toLocaleTimeString()}`
+        : '';
+    }
+
+    function renderError(msg) {
+      dotEl.dataset.state  = 'error';
+      labelEl.textContent  = 'Unreachable';
+      metaEl.textContent   = msg || '';
+      ledgerEl.textContent = '—';
+      metaLedger.textContent = '';
+    }
+
+    async function poll() {
+      setLoading();
+      try {
+        const res = await fetch(INDEXER_STATUS_URL, { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) { renderError(`HTTP ${res.status}`); return; }
+        const data = await res.json();
+        renderOk(data);
+      } catch (err) {
+        renderError(err.name === 'TimeoutError' ? 'Request timed out' : err.message);
+      } finally {
+        lastEl.textContent = new Date().toLocaleTimeString();
+      }
+    }
+
+    document.getElementById('refresh-btn').addEventListener('click', poll);
+    poll();
+    setInterval(poll, POLL_INTERVAL_MS);
+  })();
+</script>
+<script>
+  (() => {
+    const root = document.documentElement;
+    const themeToggle = document.querySelector('.theme-toggle');
+    const menuToggle  = document.querySelector('.menu-toggle');
+    const nav         = document.querySelector('#site-nav');
+    const savedTheme  = localStorage.getItem('theme');
+    if (savedTheme === 'light' || savedTheme === 'dark') root.dataset.theme = savedTheme;
+    const updateTheme = () => {
+      const dark = root.dataset.theme === 'dark' || (!root.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+      themeToggle.textContent = dark ? 'Light mode' : 'Dark mode';
+      themeToggle.setAttribute('aria-label', dark ? 'Use light mode' : 'Use dark mode');
+      themeToggle.setAttribute('aria-pressed', String(dark));
+    };
+    themeToggle.addEventListener('click', () => {
+      const dark = root.dataset.theme === 'dark' || (!root.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+      root.dataset.theme = dark ? 'light' : 'dark';
+      localStorage.setItem('theme', root.dataset.theme);
+      updateTheme();
+    });
+    menuToggle.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      menuToggle.setAttribute('aria-expanded', String(open));
+    });
+    updateTheme();
+  })();
+</script>
+</body>
+</html>

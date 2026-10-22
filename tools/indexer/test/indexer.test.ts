@@ -33,6 +33,8 @@ test("loadConfig rejects missing and malformed startup configuration", () => {
   assert.throws(() => loadConfig({}), /RPC_URL is required/);
   const base = { RPC_URL: "http://localhost:3000", DB_PATH: "indexer.db", ALLOWLIST_CONTRACT_ID: CONTRACT_ID };
   assert.equal(loadConfig(base).allowlistContractId, CONTRACT_ID);
+  assert.equal(loadConfig({ ...base, START_LEDGER: "10", END_LEDGER: "12" }).endLedger, 12);
+  assert.throws(() => loadConfig({ ...base, START_LEDGER: "12", END_LEDGER: "10" }), /END_LEDGER must be >= START_LEDGER/);
   assert.throws(() => loadConfig({ ...base, ALLOWLIST_CONTRACT_ID: "bad" }), /valid Soroban contract ID/);
   assert.throws(() => loadConfig({ ...base, POLL_INTERVAL_MS: "0" }), /POLL_INTERVAL_MS/);
 });
@@ -85,4 +87,64 @@ test("recorded local RPC state change is decoded and persisted by the indexer", 
     assert.equal(db.isAllowlisted(CONTRACT_ID, ADDRESS), true);
     assert.equal(db.getLastIndexedLedger(), 101);
   } finally { db.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("END_LEDGER bounds historical indexing and checkpoints the requested end", async () => {
+  const event = (ledger: number, id: string) => ({ type: "contract", ledger, ledgerClosedAt: "2026-08-28T00:00:00.000Z", contractId: CONTRACT_ID, id, pagingToken: `${ledger}-1`, inSuccessfulContractCall: true, topic: [symbol("AllowAdd"), accountAddress()], value: xdr(0, 0, 0, 1) });
+  const server = createServer(async (req, res) => {
+    const body = await new Promise<string>((resolve) => { let data = ""; req.on("data", (chunk) => data += chunk); req.on("end", () => resolve(data)); });
+    const method = JSON.parse(body).method;
+    const result = method === "getLatestLedger" ? { sequence: 105 } : { events: [event(100, "in-range"), event(101, "past-end")], latestLedger: 105 };
+    res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ jsonrpc: "2.0", result }));
+  });
+  const port = await listen(server);
+  const directory = await mkdtemp(join(tmpdir(), "compliance-backfill-"));
+  const path = join(directory, "indexer.db");
+  const db = await ComplianceDb.open(path);
+  const config = loadConfig({ RPC_URL: `http://127.0.0.1:${port}`, DB_PATH: path, ALLOWLIST_CONTRACT_ID: CONTRACT_ID, START_LEDGER: "100", END_LEDGER: "100" });
+  try {
+    await new Indexer(config, db).pollOnce();
+    assert.equal(db.getEventCount(CONTRACT_ID), 1);
+    assert.equal(db.getLastIndexedLedger(), 100);
+    assert.equal(db.isAllowlisted(CONTRACT_ID, ADDRESS), true);
+  } finally { db.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("poll logs a lagging event horizon and ignores a regressed response", async () => {
+  const event = { type: "contract", ledger: 105, ledgerClosedAt: "2026-08-28T00:00:00.000Z", contractId: CONTRACT_ID, id: "fixture-allow-add", pagingToken: "105-1", inSuccessfulContractCall: true, topic: [symbol("AllowAdd"), accountAddress()], value: xdr(0, 0, 0, 1) };
+  let eventCalls = 0;
+  const server = createServer(async (req, res) => {
+    const body = await new Promise<string>((resolve) => { let data = ""; req.on("data", (chunk) => data += chunk); req.on("end", () => resolve(data)); });
+    const method = JSON.parse(body).method;
+    let result: unknown;
+    if (method === "getLatestLedger") result = { sequence: 120 };
+    else {
+      eventCalls += 1;
+      result = { events: eventCalls === 1 ? [event] : [], latestLedger: eventCalls === 1 ? 110 : 109 };
+    }
+    res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ jsonrpc: "2.0", result }));
+  });
+  const port = await listen(server);
+  const directory = await mkdtemp(join(tmpdir(), "compliance-gap-check-"));
+  const path = join(directory, "indexer.db");
+  const db = await ComplianceDb.open(path);
+  const config = loadConfig({ RPC_URL: `http://127.0.0.1:${port}`, DB_PATH: path, ALLOWLIST_CONTRACT_ID: CONTRACT_ID, START_LEDGER: "100" });
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+  try {
+    const indexer = new Indexer(config, db);
+    await indexer.pollOnce();
+    assert.equal(db.getLastIndexedLedger(), 110);
+    await indexer.pollOnce();
+    assert.equal(db.getLastIndexedLedger(), 110);
+    assert.equal(db.getEventCount(CONTRACT_ID), 1);
+    assert.ok(warnings.some((warning) => warning.includes("Ledger gap detected")));
+    assert.ok(warnings.some((warning) => warning.includes("Ledger regression detected")));
+  } finally {
+    console.warn = originalWarn;
+    db.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
 });

@@ -9,7 +9,18 @@
 #
 # `scripts/check-wasm-size.sh` allows a contract's binary to grow up to 10%
 # over its baseline before failing (same tolerance convention as the
-# per-function CPU/memory budgets in budget-baselines.toml). When a
+# per-function CPU/memory budgets in budget-baselines.toml).
+#
+# Budget rationale: `max_bytes` is the measured size at the time the entry
+# was added, and the enforced limit is `max_bytes * 1.10` (rounded down).
+# 10% leaves room for small features and SDK patch bumps without churn,
+# while still catching a dependency or codegen change that balloons a
+# binary. For scale, every contract here is well under Soroban's 64 KiB
+# network contract-size limit, so the budget is about noticing growth
+# early, not about the hard ceiling.
+#
+# When the check fails it names the contract and reports how many bytes
+# (and what percentage) the binary is over both its baseline and its limit. When a
 # deliberate size increase pushes a contract over budget, re-measure and
 # update its baseline here in the same PR, with a one-line note in the PR
 # description on why the growth is expected.
@@ -22,14 +33,27 @@
 #     into allowlist-token, denylist-gate, jurisdiction-flag, and others.
 #
 # Contracts NOT yet covered below (tracked separately, not part of this
-# CI job's scope): `allowlist-token`, `audit-log`, `denylist-gate`,
-# `jurisdiction-flag`, and `policy-engine` currently fail to compile on
-# `main` for reasons unrelated to wasm size (missing imports, a duplicated
-# function definition, a mismatched delimiter, and a trait-impl mismatch,
-# respectively — see repo issue tracker). `scripts/check-wasm-size.sh`
+# CI job's scope): `audit-log` and `policy-engine` currently fail to compile
+# on `main` for reasons unrelated to wasm size (see repo issue tracker). `scripts/check-wasm-size.sh`
 # skips any contract without a budget entry here rather than failing the
 # build on crates it can't measure; once each contract compiles again, add
 # its budget entry here so this job covers all nine contracts as intended.
+
+# The three core primitives (#96). Baselines measured with rustc 1.91.0 /
+# soroban-sdk 27.0.0 after adding transfer_admin / transfer_issuer (#19)
+# and jurisdiction-code validation (#82).
+
+[allowlist-token]
+wasm = "allowlist_token.wasm"
+max_bytes = 21133
+
+[denylist-gate]
+wasm = "denylist_gate.wasm"
+max_bytes = 16646
+
+[jurisdiction-flag]
+wasm = "jurisdiction_flag.wasm"
+max_bytes = 16050
 
 [circuit-breaker]
 wasm = "circuit_breaker.wasm"

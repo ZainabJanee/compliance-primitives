@@ -62,3 +62,34 @@ impl MockJurisdiction {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Inline mock: circuit-breaker check
+//
+// `is_frozen()` returns the stored frozen state, matching
+// `CircuitBreakerInterface` used by `policy-engine`.
+// ---------------------------------------------------------------------------
+
+#[contract]
+pub struct MockCircuitBreaker;
+
+#[contractimpl]
+impl MockCircuitBreaker {
+    /// Freeze the circuit-breaker (causes `is_frozen` to return `true`).
+    pub fn freeze(env: Env) {
+        env.storage().instance().set(&true, &true);
+    }
+
+    /// Unfreeze the circuit-breaker.
+    pub fn unfreeze(env: Env) {
+        env.storage().instance().set(&true, &false);
+    }
+
+    /// Returns `true` if the circuit-breaker has been frozen.
+    pub fn is_frozen(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<bool, bool>(&true)
+            .unwrap_or(false)
+    }
+}

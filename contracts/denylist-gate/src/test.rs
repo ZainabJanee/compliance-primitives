@@ -70,6 +70,42 @@ fn test_check_defaults_to_clear() {
 }
 
 #[test]
+fn test_compliance_officer_view_tracks_assignment_and_revocation() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+    let officer = Address::generate(&env);
+
+    assert_eq!(client.get_compliance_officer(), None);
+    client.set_compliance_officer(&admin, &officer);
+    assert_eq!(client.get_compliance_officer(), Some(officer));
+    client.revoke_compliance_officer(&admin);
+    assert_eq!(client.get_compliance_officer(), None);
+}
+
+#[test]
+fn bench_add_to_denylist_with_and_without_audit_log() {
+    let env = Env::default();
+    let (admin, _gate_id, client) = setup(&env);
+    let without_audit = Address::generate(&env);
+    env.cost_estimate().budget().reset_default();
+    client.add_to_denylist(&admin, &without_audit);
+    let without_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let without_memory = env.cost_estimate().budget().memory_bytes_cost();
+
+    let audit_admin = Address::generate(&env);
+    let audit_id = env.register(audit_log::AuditLog, ());
+    audit_log::AuditLogClient::new(&env, &audit_id).initialize(&audit_admin);
+    client.set_audit_log(&admin, &audit_id);
+    let with_audit = Address::generate(&env);
+    env.cost_estimate().budget().reset_default();
+    client.add_to_denylist(&admin, &with_audit);
+    let with_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let with_memory = env.cost_estimate().budget().memory_bytes_cost();
+
+    std::println!("denylist add without audit: cpu={without_cpu} memory={without_memory}; with audit: cpu={with_cpu} memory={with_memory}");
+}
+
+#[test]
 fn test_budget_regression_denylist_check() {
     let env = Env::default();
     let (_admin, _contract_id, client) = setup(&env);
@@ -126,15 +162,63 @@ fn test_add_to_denylist_rejects_non_admin() {
     assert!(client.check(&alice));
 }
 
+/// Soroban's `Address` type has no literal "empty" or "invalid" value the
+/// way a raw string (`""`) would: every `Address` is either a well-formed
+/// account or contract identifier, and the host rejects malformed ones
+/// before they can ever reach contract code. So there is no empty-address
+/// input to test directly.
+///
+/// What this test guards instead is the default-value invariant for a
+/// storage key that has never been written: `check` reads
+/// `DataKey::Denied(address)` and falls back via `unwrap_or(false)`, so an
+/// untouched address must read as "clear" (`true`) rather than panicking
+/// or defaulting to denied.
 #[test]
 fn test_empty_address_key_is_well_defined() {
-    // An address that has never been touched must read as "clear" (true),
-    // not panic or default to denied. This guards the `unwrap_or(false)`
-    // fallback in `check`.
     let env = Env::default();
     let (_admin, _contract_id, client) = setup(&env);
     let never_seen = Address::generate(&env);
     assert!(client.check(&never_seen));
+}
+
+#[test]
+fn test_check_fresh_address_never_referenced_is_clear() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    // Touch the denylist with other addresses so storage is not pristine.
+    let bob = Address::generate(&env);
+    let carol = Address::generate(&env);
+    client.add_to_denylist(&admin, &bob);
+    client.add_to_denylist(&admin, &carol);
+    client.remove_from_denylist(&admin, &carol);
+
+    // A freshly generated address the contract has never seen in any call.
+    let fresh = Address::generate(&env);
+    assert!(client.check(&fresh));
+    assert!(!client.check(&bob));
+}
+
+#[test]
+fn test_add_then_remove_returns_to_default_clear_state() {
+    let env = Env::default();
+    let (admin, contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    client.add_to_denylist(&admin, &alice);
+    assert!(!client.check(&alice));
+
+    client.remove_from_denylist(&admin, &alice);
+    assert!(client.check(&alice));
+
+    // The storage entry itself must be gone, not left behind as a stale
+    // `false` or `true` value.
+    env.as_contract(&contract_id, || {
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKey::Denied(alice.clone())));
+    });
 }
 
 #[test]
@@ -233,6 +317,7 @@ fn test_remove_multiple_from_denylist_batch_limit_succeeds() {
         addresses.push_back(address);
     }
 
+    env.cost_estimate().budget().reset_default();
     client.remove_multiple_from_denylist(&admin, &addresses);
 
     for address in addresses.iter() {
@@ -345,8 +430,8 @@ fn test_multisig_add_signer() {
     let signers = vec![&env, admin.clone(), signer1.clone()];
     client.initialize_multisig(&admin, &signers, &2);
 
-    // Add a new signer
-    let result = client.try_add_signer(&new_signer);
+    // Add a new signer (first of two required approvals)
+    let result = client.try_add_signer(&admin, &new_signer);
     assert!(result.is_ok());
 }
 
@@ -369,7 +454,7 @@ fn test_multisig_remove_signer() {
     client.initialize_multisig(&admin, &signers, &2);
 
     // Remove one signer (should still have 2)
-    let result = client.try_remove_signer(&signer2);
+    let result = client.try_remove_signer(&admin, &signer2);
     assert!(result.is_ok());
 }
 
@@ -390,6 +475,293 @@ fn test_multisig_remove_signer_fails_if_only_one() {
     client.initialize_multisig(&admin, &signers, &1);
 
     // Try to remove the only signer (should fail)
-    let result = client.try_remove_signer(&admin);
+    let result = client.try_remove_signer(&admin, &admin);
     assert_eq!(result, Err(Ok(Error::InvalidSignerSet)));
+}
+
+fn setup_multisig<'a>(
+    env: &'a Env,
+    signer_count: u32,
+    threshold: u32,
+) -> (Address, soroban_sdk::Vec<Address>, DenylistGateClient<'a>) {
+    let (admin, _contract_id, client) = setup(env);
+    let mut signers = vec![env, admin.clone()];
+    for _ in 1..signer_count {
+        signers.push_back(Address::generate(env));
+    }
+    client.initialize_multisig(&admin, &signers, &threshold);
+    (admin, signers, client)
+}
+
+#[test]
+fn test_multisig_non_signer_cannot_add_signer() {
+    let env = Env::default();
+    let (_admin, signers, client) = setup_multisig(&env, 2, 1);
+    let outsider = Address::generate(&env);
+    let new_signer = Address::generate(&env);
+
+    let result = client.try_add_signer(&outsider, &new_signer);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+    assert_eq!(client.signers(), signers);
+}
+
+#[test]
+fn test_multisig_non_signer_cannot_remove_signer() {
+    let env = Env::default();
+    let (_admin, signers, client) = setup_multisig(&env, 2, 1);
+    let outsider = Address::generate(&env);
+    let target = signers.get_unchecked(1);
+
+    let result = client.try_remove_signer(&outsider, &target);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+    assert_eq!(client.signers(), signers);
+}
+
+#[test]
+fn test_multisig_signer_can_add_and_remove_signer() {
+    let env = Env::default();
+    let (admin, signers, client) = setup_multisig(&env, 2, 1);
+    let new_signer = Address::generate(&env);
+
+    client.add_signer(&admin, &new_signer);
+    assert_eq!(client.signers().len(), 3);
+    assert!(client.signers().iter().any(|s| s == new_signer));
+
+    // The newly added signer is a genuine signer and can act in turn.
+    let original = signers.get_unchecked(1);
+    client.remove_signer(&new_signer, &original);
+    assert_eq!(client.signers().len(), 2);
+    assert!(!client.signers().iter().any(|s| s == original));
+}
+
+#[test]
+fn test_multisig_removed_signer_loses_authority() {
+    let env = Env::default();
+    let (admin, signers, client) = setup_multisig(&env, 3, 1);
+    let removed = signers.get_unchecked(2);
+    client.remove_signer(&admin, &removed);
+
+    let result = client.try_add_signer(&removed, &Address::generate(&env));
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}
+
+#[test]
+fn test_multisig_change_needs_threshold_distinct_approvals() {
+    let env = Env::default();
+    let (admin, signers, client) = setup_multisig(&env, 3, 2);
+    let other = signers.get_unchecked(1);
+    let new_signer = Address::generate(&env);
+
+    // One signer approving, even repeatedly, never reaches a threshold of 2.
+    client.add_signer(&admin, &new_signer);
+    client.add_signer(&admin, &new_signer);
+    assert_eq!(client.signers().len(), 3);
+
+    // A second distinct signer's approval applies the change.
+    client.add_signer(&other, &new_signer);
+    assert_eq!(client.signers().len(), 4);
+    assert!(client.signers().iter().any(|s| s == new_signer));
+}
+
+#[test]
+fn test_multisig_add_existing_signer_rejected() {
+    let env = Env::default();
+    let (admin, signers, client) = setup_multisig(&env, 2, 1);
+    let existing = signers.get_unchecked(1);
+
+    let result = client.try_add_signer(&admin, &existing);
+    assert_eq!(result, Err(Ok(Error::SignerAlreadyExists)));
+}
+
+#[test]
+fn test_multisig_remove_unknown_signer_rejected() {
+    let env = Env::default();
+    let (admin, _signers, client) = setup_multisig(&env, 2, 1);
+
+    let result = client.try_remove_signer(&admin, &Address::generate(&env));
+    assert_eq!(result, Err(Ok(Error::SignerNotInSet)));
+}
+
+#[test]
+fn test_multisig_remove_below_threshold_rejected() {
+    let env = Env::default();
+    let (admin, signers, client) = setup_multisig(&env, 2, 2);
+    let other = signers.get_unchecked(1);
+
+    let result = client.try_remove_signer(&admin, &other);
+    assert_eq!(result, Err(Ok(Error::InvalidThreshold)));
+}
+
+#[test]
+fn test_signer_changes_require_multisig_to_be_enabled() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    let result = client.try_add_signer(&admin, &Address::generate(&env));
+    assert_eq!(result, Err(Ok(Error::MultisigNotEnabled)));
+}
+
+#[test]
+fn test_multisig_initialize_twice_fails() {
+    let env = Env::default();
+    let (admin, signers, client) = setup_multisig(&env, 2, 1);
+
+    let result = client.try_initialize_multisig(&admin, &signers, &1);
+    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+}
+
+#[test]
+fn test_multisig_initialize_rejects_non_admin() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+    let impostor = Address::generate(&env);
+    let signers = vec![&env, impostor.clone()];
+
+    let result = client.try_initialize_multisig(&impostor, &signers, &1);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}
+
+// ---------------------------------------------------------------------------
+// Admin transfer (#19)
+// ---------------------------------------------------------------------------
+
+mod admin_transfer {
+    use super::setup;
+    use crate::{DenylistGate, DenylistGateClient, Error};
+    use soroban_sdk::testutils::{Address as _, Events as _};
+    use soroban_sdk::{vec, Address, Env, IntoVal, Map, Symbol, Val};
+
+    #[test]
+    fn test_transfer_admin_emits_event_and_hands_over_control() {
+        let env = Env::default();
+        let (admin, contract_id, client) = setup(&env);
+        let new_admin = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+
+        assert_eq!(
+            env.events().all(),
+            vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (
+                        Symbol::new(&env, "admin_transferred"),
+                        admin.clone(),
+                        new_admin.clone(),
+                    )
+                        .into_val(&env),
+                    Map::<Symbol, Val>::new(&env).into_val(&env),
+                ),
+            ]
+        );
+
+        let mallory = Address::generate(&env);
+        client.add_to_denylist(&new_admin, &mallory);
+        assert!(!client.check(&mallory));
+    }
+
+    #[test]
+    fn test_transfer_admin_rejects_non_admin() {
+        let env = Env::default();
+        let (admin, _contract_id, client) = setup(&env);
+        let impostor = Address::generate(&env);
+
+        let result = client.try_transfer_admin(&impostor, &impostor);
+        assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+
+        // The real admin is unchanged and still in control.
+        let mallory = Address::generate(&env);
+        client.add_to_denylist(&admin, &mallory);
+        assert!(!client.check(&mallory));
+        assert_eq!(
+            client.try_add_to_denylist(&impostor, &mallory),
+            Err(Ok(Error::NotAuthorized))
+        );
+    }
+
+    #[test]
+    fn test_transfer_admin_revokes_old_admin_immediately() {
+        let env = Env::default();
+        let (old_admin, _contract_id, client) = setup(&env);
+        let new_admin = Address::generate(&env);
+        let mallory = Address::generate(&env);
+
+        client.transfer_admin(&old_admin, &new_admin);
+
+        assert_eq!(
+            client.try_add_to_denylist(&old_admin, &mallory),
+            Err(Ok(Error::NotAuthorized))
+        );
+        assert_eq!(
+            client.try_remove_from_denylist(&old_admin, &mallory),
+            Err(Ok(Error::NotAuthorized))
+        );
+        assert_eq!(client.try_pause(&old_admin), Err(Ok(Error::NotAuthorized)));
+        assert_eq!(
+            client.try_transfer_admin(&old_admin, &old_admin),
+            Err(Ok(Error::NotAuthorized))
+        );
+        assert!(client.check(&mallory));
+    }
+
+    #[test]
+    fn test_transfer_admin_works_while_paused() {
+        let env = Env::default();
+        let (admin, _contract_id, client) = setup(&env);
+        let new_admin = Address::generate(&env);
+
+        client.pause(&admin);
+        client.transfer_admin(&admin, &new_admin);
+        client.unpause(&new_admin);
+
+        let mallory = Address::generate(&env);
+        client.add_to_denylist(&new_admin, &mallory);
+        assert!(!client.check(&mallory));
+    }
+
+    #[test]
+    fn test_transfer_admin_fails_before_initialize() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(DenylistGate, ());
+        let client = DenylistGateClient::new(&env, &contract_id);
+        let someone = Address::generate(&env);
+
+        assert_eq!(
+            client.try_transfer_admin(&someone, &someone),
+            Err(Ok(Error::NotInitialized))
+        );
+    }
+}
+
+#[test]
+fn test_add_and_remove_without_audit_log_is_unchanged() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    assert!(client.check(&alice));
+
+    client.add_to_denylist(&admin, &alice);
+    assert!(!client.check(&alice));
+
+    client.remove_from_denylist(&admin, &alice);
+    assert!(client.check(&alice));
+}
+
+#[test]
+fn test_remove_multiple_from_denylist_removes_all_without_audit_log_noise() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.add_to_denylist(&admin, &alice);
+    client.add_to_denylist(&admin, &bob);
+
+    client.remove_multiple_from_denylist(&admin, &vec![&env, alice.clone(), bob.clone()]);
+
+    assert!(client.check(&alice));
+    assert!(client.check(&bob));
 }

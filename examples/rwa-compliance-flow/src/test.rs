@@ -67,8 +67,8 @@ fn test_rwa_token_flow_success_all_checks_pass() {
     let bob = Address::generate(&env);
 
     // Step 1: Add both parties to the allowlist
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice);
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &bob);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice, &None);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &bob, &None);
 
     // Step 2: Ensure both parties are NOT on the denylist (by default they aren't)
     assert!(setup.denylist_gate.check(&alice));
@@ -119,7 +119,7 @@ fn test_rwa_token_flow_blocked_by_allowlist() {
     let bob = Address::generate(&env);
 
     // Add only alice to allowlist, NOT bob
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice, &None);
 
     // Set jurisdiction for both (would otherwise pass)
     let usa_code = String::from_slice(&env, "US");
@@ -160,8 +160,8 @@ fn test_rwa_token_flow_blocked_by_denylist() {
     let bob = Address::generate(&env);
 
     // Add both to allowlist (would otherwise pass)
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice);
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &bob);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice, &None);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &bob, &None);
 
     // Set jurisdiction for both (would otherwise pass)
     let usa_code = String::from_slice(&env, "US");
@@ -201,8 +201,8 @@ fn test_rwa_token_flow_blocked_by_jurisdiction() {
     let bob = Address::generate(&env);
 
     // Add both to allowlist (would otherwise pass)
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice);
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &bob);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice, &None);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &bob, &None);
 
     // Ensure neither is on denylist (would otherwise pass)
     assert!(setup.denylist_gate.check(&alice));
@@ -246,7 +246,7 @@ fn test_rwa_token_flow_blocked_by_all_three_independently() {
 
     // Charlie: NOT on allowlist
     // Diana: ON allowlist
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &diana);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &diana, &None);
 
     // Charlie: ON denylist
     // Diana: NOT on denylist
@@ -306,7 +306,7 @@ fn test_unified_compliance_check_interface() {
 
     // Set up different compliance states
     // Alice: allowlisted, not denied, has jurisdiction
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice, &None);
     let usa_code = String::from_slice(&env, "US");
     setup.jurisdiction_flag.set_jurisdiction(&setup.issuer, &alice, &usa_code);
 
@@ -314,7 +314,7 @@ fn test_unified_compliance_check_interface() {
     setup.jurisdiction_flag.set_jurisdiction(&setup.issuer, &bob, &usa_code);
 
     // Charlie: allowlisted, denied, no jurisdiction
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &charlie);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &charlie, &None);
     setup.denylist_gate.add_to_denylist(&setup.denylist_admin, &charlie);
 
     // Test calling through specialized interfaces
@@ -356,8 +356,8 @@ fn test_compliance_check_enables_polymorphic_composition() {
     let bob = Address::generate(&env);
 
     // Set up: both compliant
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice);
-    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &bob);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &alice, &None);
+    setup.allowlist_token.add_to_allowlist(&setup.allowlist_admin, &bob, &None);
 
     let usa_code = String::from_slice(&env, "US");
     setup.jurisdiction_flag.set_jurisdiction(&setup.issuer, &alice, &usa_code);
@@ -402,24 +402,24 @@ fn test_integration_with_policy_engine() {
     // Initialize policy engine
     let engine_id = env.register(PolicyEngine, ());
     let engine = PolicyEngineClient::new(&env, &engine_id);
-    engine.initialize(&setup.issuer, &CombineOp::All);
+    engine.initialize(&setup.issuer, &CombineOp::All, &None);
 
     // Register denylist-gate and jurisdiction-flag checkkind
     engine.add_check(
         &setup.issuer,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(policy_engine::DenylistCheck {
             contract: setup.denylist_gate.address.clone(),
-        },
+        }),
     );
 
     let usa_code = String::from_slice(&env, "US");
     let permitted_codes = soroban_sdk::vec![&env, usa_code.clone()];
     engine.add_check(
         &setup.issuer,
-        &CheckKind::Jurisdiction {
+        &CheckKind::Jurisdiction(policy_engine::JurisdictionCheck {
             contract: setup.jurisdiction_flag.address.clone(),
             allowed_codes: permitted_codes,
-        },
+        }),
     );
 
     // Set jurisdictions for all

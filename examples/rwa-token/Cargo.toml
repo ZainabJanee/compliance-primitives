@@ -17,6 +17,7 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 allowlist-token = { path = "../../contracts/allowlist-token", features = ["testutils"] }
+circuit-breaker = { path = "../../contracts/circuit-breaker", features = ["testutils"] }
 denylist-gate = { path = "../../contracts/denylist-gate", features = ["testutils"] }
 jurisdiction-flag = { path = "../../contracts/jurisdiction-flag", features = ["testutils"] }
 

@@ -1,0 +1,13 @@
+# Ignore build artefacts and dev-only files that don't belong in the image.
+
+node_modules
+dist
+*.db
+*.log
+.env
+.env.*
+!.env.example
+test
+*.test.ts
+*.md
+.git

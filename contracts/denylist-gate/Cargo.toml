@@ -17,6 +17,7 @@ compliance-pausable = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 compliance-pausable = { workspace = true, features = ["testutils"] }
+audit-log = { path = "../audit-log" }
 
 [features]
 testutils = ["soroban-sdk/testutils", "compliance-pausable/testutils"]

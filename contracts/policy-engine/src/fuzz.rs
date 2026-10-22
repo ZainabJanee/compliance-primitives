@@ -6,6 +6,7 @@ use denylist_gate::{DenylistGate, DenylistGateClient};
 use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{vec, Env};
+use std::string::ToString;
 
 /// Tiny xorshift32 so we don't need an extra RNG crate in tests.
 fn next_u32(state: &mut u32) -> u32 {
@@ -51,7 +52,7 @@ fn fuzz_policy_engine_tree_and_evaluation() {
         } else {
             CombineOp::Any
         };
-        client.initialize(&admin, &op);
+        client.initialize(&admin, &op, &None);
 
         // 2. Setup multiple denylist gates and jurisdiction flags
         let num_gates = 2;
@@ -107,9 +108,9 @@ fn fuzz_policy_engine_tree_and_evaluation() {
                     // Add check
                     if next_u32(&mut rng) % 2 == 0 {
                         let gate_idx = next_usize(&mut rng, num_gates);
-                        let check = CheckKind::Denylist {
+                        let check = CheckKind::Denylist(DenylistCheck {
                             contract: gates[gate_idx].clone(),
-                        };
+                        });
                         client.add_check(&admin, &check);
                         registered_checks.push(check);
                     } else {
@@ -119,10 +120,10 @@ fn fuzz_policy_engine_tree_and_evaluation() {
                             String::from_str(&env, permitted_codes[0]),
                             String::from_str(&env, permitted_codes[1]),
                         ];
-                        let check = CheckKind::Jurisdiction {
+                        let check = CheckKind::Jurisdiction(JurisdictionCheck {
                             contract: flags[flag_idx].clone(),
                             allowed_codes: allowed_codes_vec,
-                        };
+                        });
                         client.add_check(&admin, &check);
                         registered_checks.push(check);
                     }
@@ -179,8 +180,8 @@ fn fuzz_policy_engine_tree_and_evaluation() {
                         &flags,
                         &denylist_states,
                         &jurisdiction_states,
-                        permitted_codes,
-                        all_codes,
+                        &permitted_codes,
+                        &all_codes,
                     );
                     assert_eq!(
                         result, expected,
@@ -211,8 +212,8 @@ fn fuzz_policy_engine_tree_and_evaluation() {
                         &flags,
                         &denylist_states,
                         &jurisdiction_states,
-                        permitted_codes,
-                        all_codes,
+                        &permitted_codes,
+                        &all_codes,
                     );
                     assert_eq!(batch_results.get(1).unwrap(), expected_rev);
                 }
@@ -232,22 +233,25 @@ fn evaluate_model(
     flags: &[Address],
     denylist_states: &[std::vec::Vec<bool>],
     jurisdiction_states: &[std::vec::Vec<usize>],
-    permitted_codes: &[&str],
+    _permitted_codes: &[&str],
     all_codes: &[&str],
 ) -> bool {
     let run_check_model = |check: &CheckKind, addr_idx: usize| -> bool {
         match check {
-            CheckKind::Denylist { contract } => {
-                let gate_idx = gates.iter().position(|id| id == contract).unwrap();
+            CheckKind::Denylist(inner) => {
+                let gate_idx = gates.iter().position(|id| id == &inner.contract).unwrap();
                 let is_denylisted = denylist_states[gate_idx][addr_idx];
                 !is_denylisted
             }
-            CheckKind::Jurisdiction { contract, .. } => {
-                let flag_idx = flags.iter().position(|id| id == contract).unwrap();
+            CheckKind::Jurisdiction(inner) => {
+                let flag_idx = flags.iter().position(|id| id == &inner.contract).unwrap();
                 let code_idx = jurisdiction_states[flag_idx][addr_idx];
                 let code_str = all_codes[code_idx];
-                permitted_codes.contains(&code_str)
+                inner.allowed_codes.iter().any(|code| code.to_string() == code_str)
             }
+            CheckKind::Allowlist(_) => true,
+            // The fuzz harness never registers circuit-breaker checks.
+            CheckKind::CircuitBreaker(_) => true,
         }
     };
 

@@ -137,3 +137,6 @@ impl ExampleToken {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod fuzz_test;

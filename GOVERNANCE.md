@@ -155,3 +155,68 @@ All PRs are reviewed against:
 ## Questions?
 
 If you're unsure about complexity, scope, or whether an issue is a good fit, open an issue with your question or comment on the relevant existing issue. The maintainers are here to help.
+
+## Merging conflicting contract PRs
+
+When two or more feature PRs have both touched the same contract source file
+(e.g. `contracts/allowlist-token/src/lib.rs`), merging one after the other
+can leave the workspace in a broken state — not because of a git conflict
+marker, but because the combined code contains duplicate or orphaned function
+bodies that each compiled fine on their own branch.
+
+**Use this checklist before marking a conflict-resolution merge as ready:**
+
+1. **Resolve conflict markers completely.**
+   Search for `<<<<<<<`, `=======`, `>>>>>>>` in every file you touched.
+   Even one leftover marker will prevent compilation.
+
+   ```sh
+   git diff --check
+   ```
+
+2. **Check for duplicate function / `impl` bodies.**
+   Two branches adding the same function produce a valid merge but a
+   compilation error.  After resolving markers, grep for duplicate `fn`
+   names in any shared file:
+
+   ```sh
+   grep -n "^\s*pub fn " contracts/allowlist-token/src/lib.rs | sort | uniq -d
+   ```
+
+3. **Run `cargo test -p <crate>` on every affected crate — not just `cargo check`.**
+   `cargo check` catches type errors; `cargo test` also catches logic
+   regressions introduced by a silently wrong merge (e.g. a function body
+   from the wrong branch surviving the merge).
+
+   ```sh
+   # Example: two PRs both touched allowlist-token and denylist-gate
+   cargo test -p allowlist-token
+   cargo test -p denylist-gate
+   ```
+
+4. **Only run the full workspace suite once individual crates are clean.**
+   Diagnosing five simultaneous workspace errors is harder than diagnosing
+   one crate at a time.
+
+   ```sh
+   cargo test --workspace
+   cargo clippy --workspace --all-targets -- -D warnings
+   ```
+
+5. **Check storage key enums for duplicates.**
+   If both branches added a variant to a `DataKey` or similar
+   `#[contracttype]` enum, the combined enum may have two variants with
+   the same discriminant.  Review every `#[contracttype]` enum in the
+   merged files for duplicate integer values or variant names.
+
+6. **Re-run `./scripts/regenerate-docs.sh` if any public function signature changed.**
+   The merge may have landed with the interface docs from one branch still
+   in place, out of sync with the combined code.
+
+7. **Update `CHANGELOG.md`** if the merge brings in a version bump from
+   either branch.  CI enforces that every version bump has a corresponding
+   changelog entry.
+
+> **Rule of thumb:** if a conflict touched a `#[contractimpl]` or
+> `#[contractevent]` block, treat it as a `complexity: high` merge and
+> review it as carefully as a new contract feature.

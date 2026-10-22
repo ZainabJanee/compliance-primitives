@@ -54,6 +54,18 @@ function xdrStr(s: string): number[] {
   return xdrStringLike(14, s);
 }
 
+function xdrBool(value: boolean): number[] {
+  return [...u32(0), ...u32(value ? 1 : 0)];
+}
+
+function xdrU32(value: number): number[] {
+  return [...u32(3), ...u32(value)];
+}
+
+function xdrVec(values: number[][]): number[] {
+  return [...u32(16), ...u32(1), ...u32(values.length), ...values.flat()];
+}
+
 /**
  * XDR-encode ScVal::Address for an Account (Ed25519 public key).
  * @param pubkey 32-byte Ed25519 public key
@@ -260,4 +272,65 @@ test("handles an empty detail string", () => {
   assert.notEqual(result, null);
   assert.strictEqual(result!.eventType, "ComplianceEvent");
   assert.strictEqual(result!.detail, "");
+});
+
+function buildNamedEventRaw(name: string, topics: number[][], data: number[]): RawSorobanEvent {
+  return {
+    type: "contract",
+    ledger: 1234,
+    ledgerClosedAt: "2025-01-01T00:00:00Z",
+    contractId: CONTRACT_ID,
+    topic: [xdrSymbol(name), ...topics].map(bytesToBase64),
+    value: bytesToBase64(data),
+    id: "named-event",
+    pagingToken: "named-event-token",
+    inSuccessfulContractCall: true,
+  };
+}
+
+test("decodes policy-engine PolicyResult fields", () => {
+  const raw = buildNamedEventRaw(
+    "PolicyResult",
+    [xdrBool(true)],
+    xdrVec([xdrAccountAddress(SUBJECT_KEY), xdrAccountAddress(SOURCE_KEY)])
+  );
+  const result = decodeEvent(raw);
+
+  assert.notEqual(result, null);
+  assert.equal(result!.eventType, "PolicyResult");
+  assert.equal(result!.policyPassed, true);
+  assert.match(result!.policyFrom!, /^G/);
+  assert.match(result!.policyTo!, /^G/);
+  assert.equal(result!.address, null);
+});
+
+test("decodes multisig-admin signer and threshold events", () => {
+  const signerAdded = decodeEvent(buildNamedEventRaw(
+    "SignerAdd",
+    [xdrAccountAddress(SUBJECT_KEY)],
+    u32(1)
+  ));
+  assert.notEqual(signerAdded, null);
+  assert.equal(signerAdded!.eventType, "SignerAdd");
+  assert.match(signerAdded!.signerAddress!, /^G/);
+
+  const signerRemoved = decodeEvent(buildNamedEventRaw(
+    "SignerRm",
+    [xdrAccountAddress(SOURCE_KEY)],
+    u32(1)
+  ));
+  assert.notEqual(signerRemoved, null);
+  assert.equal(signerRemoved!.eventType, "SignerRm");
+  assert.match(signerRemoved!.signerAddress!, /^G/);
+
+  const thresholdUpdated = decodeEvent(buildNamedEventRaw("ThreshSet", [], xdrU32(2)));
+  assert.notEqual(thresholdUpdated, null);
+  assert.equal(thresholdUpdated!.eventType, "ThreshSet");
+  assert.equal(thresholdUpdated!.newThreshold, 2);
+
+  const authApproved = decodeEvent(buildNamedEventRaw("AuthOk", [], xdrVec([xdrU32(3), xdrU32(2)])));
+  assert.notEqual(authApproved, null);
+  assert.equal(authApproved!.eventType, "AuthOk");
+  assert.equal(authApproved!.validCount, 3);
+  assert.equal(authApproved!.newThreshold, 2);
 });

@@ -59,6 +59,11 @@ pub trait JurisdictionFlagInterface {
     fn is_permitted_jurisdiction(env: Env, address: Address, allowed_codes: Vec<String>) -> bool;
 }
 
+#[contractclient(name = "CircuitBreakerClient")]
+pub trait CircuitBreakerInterface {
+    fn is_frozen(env: Env) -> bool;
+}
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -67,6 +72,7 @@ enum DataKey {
     Jurisdiction,
     AllowedCodes,
     Balance(Address),
+    CircuitBreaker,
 }
 
 #[contracterror]
@@ -79,6 +85,7 @@ pub enum Error {
     NotAllowlisted = 4,
     DeniedByGate = 5,
     JurisdictionNotPermitted = 6,
+    CircuitBreakerFrozen = 7,
 }
 
 #[contract]
@@ -93,6 +100,7 @@ impl RwaToken {
         allowlist: Address,
         gate: Address,
         jurisdiction: Address,
+        circuit_breaker: Address,
         allowed_codes: Vec<String>,
     ) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Allowlist) {
@@ -103,6 +111,9 @@ impl RwaToken {
         env.storage()
             .instance()
             .set(&DataKey::Jurisdiction, &jurisdiction);
+        env.storage()
+            .instance()
+            .set(&DataKey::CircuitBreaker, &circuit_breaker);
         env.storage()
             .instance()
             .set(&DataKey::AllowedCodes, &allowed_codes);
@@ -124,10 +135,20 @@ impl RwaToken {
             .unwrap_or(0)
     }
 
-    /// Transfer `amount` from `from` to `to` after all three compliance
+    /// Transfer `amount` from `from` to `to` after all compliance
     /// checks clear. Errors identify which gate failed.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<(), Error> {
         from.require_auth();
+
+        let circuit_breaker_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::CircuitBreaker)
+            .ok_or(Error::NotInitialized)?;
+        let circuit_breaker = CircuitBreakerClient::new(&env, &circuit_breaker_addr);
+        if circuit_breaker.is_frozen() {
+            return Err(Error::CircuitBreakerFrozen);
+        }
 
         let allowlist_addr: Address = env
             .storage()
@@ -161,9 +182,15 @@ impl RwaToken {
         }
 
         let jurisdiction = JurisdictionClient::new(&env, &jurisdiction_addr);
-        if !jurisdiction.is_permitted_jurisdiction(&from, &allowed_codes)
-            || !jurisdiction.is_permitted_jurisdiction(&to, &allowed_codes)
-        {
+        let from_permitted = matches!(
+            jurisdiction.try_is_permitted_jurisdiction(&from, &allowed_codes),
+            Ok(Ok(true))
+        );
+        let to_permitted = matches!(
+            jurisdiction.try_is_permitted_jurisdiction(&to, &allowed_codes),
+            Ok(Ok(true))
+        );
+        if !from_permitted || !to_permitted {
             return Err(Error::JurisdictionNotPermitted);
         }
 

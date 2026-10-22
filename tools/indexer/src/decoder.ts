@@ -8,7 +8,7 @@
  *   topic[1+] = the fields annotated #[topic] in declaration order
  *   data      = ScVal — struct-value encoding of any non-topic fields
  *
- * For the five event types from allowlist/denylist/jurisdiction contracts:
+ * For primitive and circuit-breaker events:
  *
  *   AllowAdd        topics: [Symbol("AllowAdd"), Address]          data: Void
  *   AllowRemove     topics: [Symbol("AllowRemove"), Address]        data: Void
@@ -16,8 +16,19 @@
  *   DenyAdd         topics: [Symbol("DenyAdd"), Address]            data: Void
  *   DenyRemove      topics: [Symbol("DenyRemove"), Address]         data: Void
  *   JurisdictionSet topics: [Symbol("JurisdictionSet"), Address]    data: String(code)
- *   Frozen          topics: [Symbol("Frozen"), Address]             data: Void
- *   Unfrozen        topics: [Symbol("Unfrozen"), Address]           data: Void
+ *   Frozen          topics: [Symbol("Frozen"), Address(admin)]       data: Void
+ *   Unfrozen        topics: [Symbol("Unfrozen"), Address(admin)]     data: Void
+ *
+ * For policy-engine:
+ *
+ *   PolicyResult topics: [Symbol("PolicyResult"), Bool(passed)]
+ *               data:   Vec[Address(from), Address(to)]
+ *
+ * For multisig-admin:
+ *
+ *   SignerAdd / SignerRm topics: [Symbol(name), Address(signer)] data: Void
+ *   ThreshSet            topics: [Symbol("ThreshSet")]          data: U32(threshold)
+ *   AuthOk               topics: [Symbol("AuthOk")]             data: Vec[U32(valid_count), U32(threshold)]
  *
  * For the audit-log contract's ComplianceEvent:
  *
@@ -305,6 +316,13 @@ const KNOWN_EVENTS = new Set([
   "JurisdictionSet",
   "Frozen",
   "Unfrozen",
+  // policy-engine events
+  "PolicyResult",
+  // multisig-admin events (symbol_short! names from the contract)
+  "SignerAdd",
+  "SignerRm",
+  "ThreshSet",
+  "AuthOk",
 ]);
 
 export function decodeEvent(
@@ -325,6 +343,28 @@ export function decodeEvent(
     const timestamp = raw.ledgerClosedAt
       ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
       : null;
+
+    const base: RawEvent = {
+      ledgerSequence: raw.ledger,
+      timestamp,
+      contractId: raw.contractId,
+      eventType: "",
+      address: null,
+      addressTo: null,
+      amount: null,
+      jurisdiction: null,
+      kind: null,
+      source: null,
+      detail: null,
+      signerAddress: null,
+      newThreshold: null,
+      validCount: null,
+      policyFrom: null,
+      policyTo: null,
+      policyPassed: null,
+      rawTopics: JSON.stringify(raw.topic),
+      rawData: raw.value ?? "",
+    };
 
     // ── audit-log ComplianceEvent detection ──────────────────────────────────
     //
@@ -361,6 +401,12 @@ export function decodeEvent(
           detail: detailVal?.type === "String" || detailVal?.type === "Symbol"
             ? detailVal.value
             : null,
+          policyFrom: null,
+          policyTo: null,
+          policyPassed: null,
+          signerAddress: null,
+          newThreshold: null,
+          validCount: null,
           rawTopics: JSON.stringify(raw.topic),
           rawData: raw.value ?? "",
         };
@@ -373,9 +419,169 @@ export function decodeEvent(
     const nameVal = topics[0];
     if (nameVal.type !== "Symbol") return null;
     const eventType = nameVal.value;
+
+    // ── circuit-breaker state-change events ───────────────────────────────────
+    //
+    // Frozen / Unfrozen:
+    //   topics: [Symbol("Frozen"|"Unfrozen"), Address(admin)]
+    //   data:   Void
+    //
+    // topic[1] carries the admin address that triggered the change, but we
+    // intentionally store address as null — the contract_id column identifies
+    // which breaker instance changed state, which is the useful lookup key.
+    if (eventType === "Frozen" || eventType === "Unfrozen") {
+      return { ...base, eventType, address: null };
+    }
+
     if (!KNOWN_EVENTS.has(eventType)) return null;
 
-    // topics[1] is always the primary address
+    // ── policy-engine PolicyResult ────────────────────────────────────────────
+    //
+    // PolicyResult has a different shape from the address-keyed events:
+    //   topics: [Symbol("PolicyResult"), Bool(passed)]
+    //   data:   Vec[Address(from), Address(to)]
+    //
+    // Handle it here before the section that requires topics[1] to be an
+    // Address.
+    if (eventType === "PolicyResult") {
+      if (topics.length < 2) return null;
+      const passedVal = topics[1];
+      if (passedVal.type !== "Bool") return null;
+
+      let policyFrom: string | null = null;
+      let policyTo: string | null = null;
+
+      // data is Vec[Address(from), Address(to)]
+      if (dataVal.type === "Vec" && dataVal.value.length >= 2) {
+        const fromVal = dataVal.value[0];
+        const toVal = dataVal.value[1];
+        if (fromVal.type === "Address") policyFrom = fromVal.value;
+        if (toVal.type === "Address") policyTo = toVal.value;
+      }
+
+      return {
+        ledgerSequence: raw.ledger,
+        timestamp,
+        contractId: raw.contractId,
+        eventType: "PolicyResult",
+        address: null,
+        addressTo: null,
+        amount: null,
+        jurisdiction: null,
+        kind: null,
+        source: null,
+        detail: null,
+        policyFrom,
+        policyTo,
+        policyPassed: passedVal.value,
+        signerAddress: null,
+        newThreshold: null,
+        validCount: null,
+        rawTopics: JSON.stringify(raw.topic),
+        rawData: raw.value ?? "",
+      };
+    }
+
+    // ── multisig-admin signer/threshold events ────────────────────────────────
+    //
+    // These events use symbol_short! names and have different topic shapes:
+    //
+    //   SignerAdd  topics: [Symbol("SignerAdd"), Address(signer)]  data: Void
+    //   SignerRm   topics: [Symbol("SignerRm"),  Address(signer)]  data: Void
+    //   ThreshSet  topics: [Symbol("ThreshSet")]                   data: U32
+    //   AuthOk     topics: [Symbol("AuthOk")]
+    //              data:   (U32(valid_count), U32(threshold)) — Soroban encodes
+    //                      a Rust tuple (u32, u32) as a two-element ScVec.
+    //
+    // ThreshSet and AuthOk only have 1 topic, so they must be handled before
+    // the section that unconditionally reads topics[1] as an Address.
+
+    if (eventType === "SignerAdd" || eventType === "SignerRm") {
+      if (topics.length < 2) return null;
+      const signerVal = topics[1];
+      if (signerVal.type !== "Address") return null;
+      return {
+        ledgerSequence: raw.ledger,
+        timestamp,
+        contractId: raw.contractId,
+        eventType,
+        address: null,
+        addressTo: null,
+        amount: null,
+        jurisdiction: null,
+        kind: null,
+        source: null,
+        detail: null,
+        policyFrom: null,
+        policyTo: null,
+        policyPassed: null,
+        signerAddress: signerVal.value,
+        newThreshold: null,
+        validCount: null,
+        rawTopics: JSON.stringify(raw.topic),
+        rawData: raw.value ?? "",
+      };
+    }
+
+    if (eventType === "ThreshSet") {
+      if (dataVal.type !== "U32") return null;
+      return {
+        ledgerSequence: raw.ledger,
+        timestamp,
+        contractId: raw.contractId,
+        eventType: "ThreshSet",
+        address: null,
+        addressTo: null,
+        amount: null,
+        jurisdiction: null,
+        kind: null,
+        source: null,
+        detail: null,
+        policyFrom: null,
+        policyTo: null,
+        policyPassed: null,
+        signerAddress: null,
+        newThreshold: dataVal.value,
+        validCount: null,
+        rawTopics: JSON.stringify(raw.topic),
+        rawData: raw.value ?? "",
+      };
+    }
+
+    if (eventType === "AuthOk") {
+      // Soroban encodes the Rust tuple (u32, u32) as a two-element ScVec.
+      let validCount: number | null = null;
+      let newThreshold: number | null = null;
+      if (dataVal.type === "Vec" && dataVal.value.length === 2) {
+        const v0 = dataVal.value[0];
+        const v1 = dataVal.value[1];
+        if (v0.type === "U32") validCount = v0.value;
+        if (v1.type === "U32") newThreshold = v1.value;
+      }
+      return {
+        ledgerSequence: raw.ledger,
+        timestamp,
+        contractId: raw.contractId,
+        eventType: "AuthOk",
+        address: null,
+        addressTo: null,
+        amount: null,
+        jurisdiction: null,
+        kind: null,
+        source: null,
+        detail: null,
+        policyFrom: null,
+        policyTo: null,
+        policyPassed: null,
+        signerAddress: null,
+        newThreshold,
+        validCount,
+        rawTopics: JSON.stringify(raw.topic),
+        rawData: raw.value ?? "",
+      };
+    }
+
+    // topics[1] is always the primary address for remaining event types
     const addrVal = topics[1];
     if (addrVal.type !== "Address") return null;
     const address = addrVal.value;
@@ -396,9 +602,7 @@ export function decodeEvent(
     }
 
     return {
-      ledgerSequence: raw.ledger,
-      timestamp,
-      contractId: raw.contractId,
+      ...base,
       eventType,
       address,
       addressTo,
@@ -407,6 +611,12 @@ export function decodeEvent(
       kind: null,
       source: null,
       detail: null,
+      policyFrom: null,
+      policyTo: null,
+      policyPassed: null,
+      signerAddress: null,
+      newThreshold: null,
+      validCount: null,
       rawTopics: JSON.stringify(raw.topic),
       rawData: raw.value ?? "",
     } as const;

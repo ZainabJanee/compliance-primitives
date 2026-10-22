@@ -14,3 +14,25 @@
     if (empty) empty.hidden = visible !== 0;
   });
 })();
+
+// Copy-to-clipboard for .code-wrap blocks
+(() => {
+  document.querySelectorAll('.code-wrap').forEach((wrap) => {
+    const btn = wrap.querySelector('.copy-btn');
+    const pre = wrap.querySelector('pre');
+    if (!btn || !pre) return;
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(pre.innerText).then(() => {
+        btn.textContent = 'Copied!';
+        btn.setAttribute('data-copied', 'true');
+        setTimeout(() => {
+          btn.textContent = 'Copy';
+          btn.removeAttribute('data-copied');
+        }, 2000);
+      }).catch(() => {
+        btn.textContent = 'Failed';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+      });
+    });
+  });
+})();

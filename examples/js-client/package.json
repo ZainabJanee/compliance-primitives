@@ -1,0 +1,21 @@
+{
+  "name": "js-client-example",
+  "version": "1.0.0",
+  "description": "Minimal TypeScript client calling a deployed compliance-primitives contract via @stellar/stellar-sdk",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsx check.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^13.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.15.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

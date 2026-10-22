@@ -60,11 +60,7 @@ pub enum FlowError {
 
 #[contractclient(name = "PolicyEngineClient")]
 pub trait PolicyEngineInterface {
-    fn evaluate(
-        env: Env,
-        from: Address,
-        to: Address,
-    ) -> Result<bool, soroban_sdk::contracterror::ContractError>;
+    fn evaluate(env: Env, from: Address, to: Address) -> bool;
 }
 
 #[contractclient(name = "CircuitBreakerClient")]
@@ -106,7 +102,7 @@ pub fn execute_transfer(
     }
 
     let policy = PolicyEngineClient::new(env, policy_engine);
-    let passed = policy.evaluate(from, to).unwrap_or(false);
+    let passed = policy.evaluate(from, to);
 
     audit.record(
         audit_source,

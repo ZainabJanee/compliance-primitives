@@ -251,3 +251,47 @@ fn test_double_initialize_fails() {
     );
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
+
+// ---------------------------------------------------------------------------
+// Additional negative-path tests  (#440)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_transfer_from_denied_when_recipient_on_denylist() {
+    // transfer_from must be blocked when the *recipient* (bob) is on the
+    // denylist, even though the sender (alice) and spender are both clear.
+    let env = Env::default();
+    let (gate_admin, gate_id, token_admin, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.mint(&token_admin, &alice, &1_000);
+    client.approve(&alice, &spender, &500, &9999u32);
+    DenylistGateClient::new(&env, &gate_id).add_to_denylist(&gate_admin, &bob);
+
+    let result = client.try_transfer_from(&spender, &alice, &bob, &300);
+    assert_eq!(result, Err(Ok(Error::DeniedByGate)));
+    // Balance and allowance must be unchanged.
+    assert_eq!(client.balance(&alice), 1_000);
+    assert_eq!(client.allowance(&alice, &spender), 500);
+}
+
+#[test]
+fn test_transfer_denied_when_both_on_denylist() {
+    // When both sender and recipient are denied, the gate check short-circuits
+    // on the sender — the transfer must still be rejected and state unchanged.
+    let env = Env::default();
+    let (gate_admin, gate_id, token_admin, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&token_admin, &alice, &1_000);
+    DenylistGateClient::new(&env, &gate_id).add_to_denylist(&gate_admin, &alice);
+    DenylistGateClient::new(&env, &gate_id).add_to_denylist(&gate_admin, &bob);
+
+    let result = client.try_transfer(&alice, &bob, &400);
+    assert_eq!(result, Err(Ok(Error::DeniedByGate)));
+    assert_eq!(client.balance(&alice), 1_000);
+    assert_eq!(client.balance(&bob), 0);
+}

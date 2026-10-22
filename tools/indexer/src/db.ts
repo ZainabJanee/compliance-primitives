@@ -15,7 +15,10 @@
  *   contract_id     TEXT NOT NULL
  *   event_type      TEXT NOT NULL      — AllowAdd | AllowRemove | Blocked |
  *                                        DenyAdd | DenyRemove | JurisdictionSet |
- *                                        ComplianceEvent
+ *                                        ComplianceEvent | SignerAdd | SignerRm |
+ *                                        ThreshSet | AuthOk | PolicyResult |
+ *                                        AdminSet | DenylistGateSet |
+ *                                        JurisdictionFlagSet | Frozen | Unfrozen
  *   address         TEXT               — primary subject address
  *   address_to      TEXT               — secondary address (Blocked only)
  *   amount          TEXT               — i128 as decimal string (Blocked only)
@@ -23,6 +26,12 @@
  *   kind            TEXT               — audit-log event kind (ComplianceEvent only)
  *   source          TEXT               — audit-log source address (ComplianceEvent only)
  *   detail          TEXT               — audit-log detail string (ComplianceEvent only)
+ *   signer_address  TEXT               — multisig-admin signer (SignerAdd/SignerRm only)
+ *   new_threshold   INTEGER            — multisig-admin threshold (ThreshSet/AuthOk only)
+ *   valid_count     INTEGER            — multisig-admin valid count (AuthOk only)
+ *   policy_from     TEXT               — policy-engine from address (PolicyResult only)
+ *   policy_to       TEXT               — policy-engine to address (PolicyResult only)
+ *   policy_passed   INTEGER            — policy-engine result 0/1 (PolicyResult only)
  *   raw_topics      TEXT NOT NULL      — JSON array of base64-XDR topic strings
  *   raw_data        TEXT NOT NULL      — base64-XDR data value
  *
@@ -85,6 +94,41 @@ export interface RawEvent {
   source: string | null;
   /** Populated for ComplianceEvent: the free-form detail string */
   detail: string | null;
+  /**
+   * Populated for PolicyResult events: the `from` address evaluated by
+   * the policy engine (topics: [Symbol("PolicyResult"), Bool(passed)],
+   * data: Vec[Address(from), Address(to)]).
+   */
+  policyFrom: string | null;
+  /**
+   * Populated for PolicyResult events: the `to` address evaluated by
+   * the policy engine.
+   */
+  policyTo: string | null;
+  /**
+   * Populated for PolicyResult events: whether the policy evaluation
+   * passed (true) or failed (false).
+   */
+  policyPassed: boolean | null;
+  /**
+   * Populated for multisig-admin SignerAdded/SignerRemoved events:
+   * the signer address that was added or removed.
+   * topics: [Symbol("SignerAdd"|"SignerRm"), Address(signer)], data: Void
+   */
+  signerAddress: string | null;
+  /**
+   * Populated for multisig-admin ThresholdUpdated and AuthOk events:
+   * the (new) threshold value.
+   * ThreshSet: data U32(threshold)
+   * AuthOk:    data Vec[U32(valid_count), U32(threshold)]
+   */
+  newThreshold: number | null;
+  /**
+   * Populated for multisig-admin AuthOk events:
+   * the number of valid signatures that satisfied the threshold.
+   * topics: [Symbol("AuthOk")], data: Vec[U32(valid_count), U32(threshold)]
+   */
+  validCount: number | null;
   rawTopics: string;
   rawData: string;
 }
@@ -143,6 +187,12 @@ export class ComplianceDb {
         kind            TEXT,
         source          TEXT,
         detail          TEXT,
+        signer_address  TEXT,
+        new_threshold   INTEGER,
+        valid_count     INTEGER,
+        policy_from     TEXT,
+        policy_to       TEXT,
+        policy_passed   INTEGER,
         raw_topics      TEXT    NOT NULL,
         raw_data        TEXT    NOT NULL
       );
@@ -155,13 +205,6 @@ export class ComplianceDb {
         ON events (event_type);
       CREATE INDEX IF NOT EXISTS idx_events_ledger
         ON events (ledger_sequence);
-      CREATE INDEX IF NOT EXISTS idx_events_signer
-        ON events (signer_address);
-      CREATE INDEX IF NOT EXISTS idx_events_policy_from
-        ON events (policy_from);
-      CREATE INDEX IF NOT EXISTS idx_events_policy_to
-        ON events (policy_to);
-
       CREATE TABLE IF NOT EXISTS allowlist (
         contract_id TEXT NOT NULL,
         address     TEXT NOT NULL,
@@ -212,6 +255,19 @@ export class ComplianceDb {
       if (!columns.includes("source_tx_hash")) this.db.run("ALTER TABLE events ADD COLUMN source_tx_hash TEXT");
       this.db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [2, new Date().toISOString()]);
     }
+    if (currentVersion < 3) {
+      const columns = this.db.exec("PRAGMA table_info(events)")[0]?.values.map((row) => String(row[1])) ?? [];
+      if (!columns.includes("signer_address")) this.db.run("ALTER TABLE events ADD COLUMN signer_address TEXT");
+      if (!columns.includes("new_threshold"))  this.db.run("ALTER TABLE events ADD COLUMN new_threshold INTEGER");
+      if (!columns.includes("valid_count"))    this.db.run("ALTER TABLE events ADD COLUMN valid_count INTEGER");
+      if (!columns.includes("policy_from"))    this.db.run("ALTER TABLE events ADD COLUMN policy_from TEXT");
+      if (!columns.includes("policy_to"))      this.db.run("ALTER TABLE events ADD COLUMN policy_to TEXT");
+      if (!columns.includes("policy_passed"))  this.db.run("ALTER TABLE events ADD COLUMN policy_passed INTEGER");
+      this.db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [3, new Date().toISOString()]);
+    }
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_events_signer ON events (signer_address)");
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_events_policy_from ON events (policy_from)");
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_events_policy_to ON events (policy_to)");
     this.flush();
   }
 
@@ -242,21 +298,27 @@ export class ComplianceDb {
       `INSERT INTO events
          (ledger_sequence, timestamp, contract_id, event_type,
           address, address_to, amount, jurisdiction,
-          kind, source, detail,
-          raw_topics, raw_data)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         kind, source, detail, signer_address, new_threshold, valid_count,
+         policy_from, policy_to, policy_passed, raw_topics, raw_data)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         e.ledgerSequence,
         e.timestamp,
         e.contractId,
         e.eventType,
-        e.address,
-        e.addressTo,
-        e.amount,
-        e.jurisdiction,
-        e.kind,
-        e.source,
-        e.detail,
+        e.address ?? null,
+        e.addressTo ?? null,
+        e.amount ?? null,
+        e.jurisdiction ?? null,
+        e.kind ?? null,
+        e.source ?? null,
+        e.detail ?? null,
+        e.signerAddress ?? null,
+        e.newThreshold ?? null,
+        e.validCount ?? null,
+        e.policyFrom ?? null,
+        e.policyTo ?? null,
+        e.policyPassed == null ? null : Number(e.policyPassed),
         e.rawTopics,
         e.rawData,
       ]
@@ -348,6 +410,80 @@ export class ComplianceDb {
       [key, value]
     );
     this.flush();
+  }
+
+  /**
+   * Query indexed compliance events that reference a given address (as
+   * primary subject or secondary address in Blocked events).
+   *
+   * @param address   Stellar/Soroban address to filter by (G… or C…).
+   * @param options   Optional filters:
+   *   - contractId   Restrict to a specific contract.
+   *   - eventType    Restrict to a specific event type (e.g. "DenyAdd").
+   *   - limit        Maximum number of rows to return (default 100).
+   *   - offset       Row offset for pagination (default 0).
+   */
+  queryEventsByAddress(
+    address: string,
+    options: {
+      contractId?: string;
+      eventType?: string;
+      limit?: number;
+      offset?: number;
+    } = {}
+  ): RawEvent[] {
+    const { contractId, eventType, limit = 100, offset = 0 } = options;
+    const conditions: string[] = ["(address = ? OR address_to = ?)"];
+    const params: (string | number)[] = [address, address];
+
+    if (contractId) {
+      conditions.push("contract_id = ?");
+      params.push(contractId);
+    }
+    if (eventType) {
+      conditions.push("event_type = ?");
+      params.push(eventType);
+    }
+
+    params.push(limit, offset);
+    const sql = `
+      SELECT
+        id, ledger_sequence, timestamp, contract_id, event_type,
+        address, address_to, amount, jurisdiction,
+        kind, source, detail,
+        raw_topics, raw_data,
+        signer_address, new_threshold, valid_count,
+        policy_from, policy_to, policy_passed
+      FROM events
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY ledger_sequence DESC, id DESC
+      LIMIT ? OFFSET ?
+    `;
+
+    const result = this.db.exec(sql, params);
+    if (!result.length || !result[0].values.length) return [];
+
+    return result[0].values.map((row): RawEvent => ({
+      ledgerSequence: Number(row[1]),
+      timestamp:      row[2] != null ? Number(row[2]) : null,
+      contractId:     String(row[3]),
+      eventType:      String(row[4]),
+      address:        row[5] != null ? String(row[5]) : null,
+      addressTo:      row[6] != null ? String(row[6]) : null,
+      amount:         row[7] != null ? String(row[7]) : null,
+      jurisdiction:   row[8] != null ? String(row[8]) : null,
+      kind:           row[9] != null ? String(row[9]) : null,
+      source:         row[10] != null ? String(row[10]) : null,
+      detail:         row[11] != null ? String(row[11]) : null,
+      rawTopics:      String(row[12]),
+      rawData:        String(row[13]),
+      signerAddress:  row[14] != null ? String(row[14]) : null,
+      newThreshold:   row[15] != null ? Number(row[15]) : null,
+      validCount:     row[16] != null ? Number(row[16]) : null,
+      policyFrom:     row[17] != null ? String(row[17]) : null,
+      policyTo:       row[18] != null ? String(row[18]) : null,
+      policyPassed:   row[19] != null ? Number(row[19]) === 1 : null,
+    }));
   }
 
   getEventCount(contractId?: string): number {

@@ -1,0 +1,19 @@
+[package]
+name = "compliance-test-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Test-only helpers for pretty-printing Soroban contract events when a test assertion fails."
+publish = false
+
+[lib]
+doctest = false
+
+# Only ever pulled in as a `[dev-dependencies]` entry, so it is never linked
+# into a contract's release/wasm build. The dependency is additionally
+# restricted to non-wasm targets so `cargo build --workspace --target
+# wasm32v1-none` (which also builds this crate as a workspace member) compiles
+# it as an empty `#![no_std]` library instead of pulling in `testutils`.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

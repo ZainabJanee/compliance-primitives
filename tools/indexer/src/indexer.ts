@@ -6,15 +6,14 @@
  *  2. Decode each event and apply it to the database
  *  3. Persist the new last_indexed_ledger
  *
- * Gaps / reconnections: this is a *reference* implementation so
- * reconnection and gap-filling are explicitly out of scope. If the process
- * dies and restarts, it resumes from last_indexed_ledger. If the RPC node
- * has pruned ledgers older than its retention window, events in the gap will
- * be missed — document this limitation rather than solving it here.
+ * The event endpoint's reported ledger horizon is checked against the last
+ * checkpoint and the latest-ledger snapshot. Gaps and regressions are logged;
+ * the indexer does not attempt to roll back a reorganization automatically.
  */
 
 import type { Config } from "./config.js";
 import type { ComplianceDb } from "./db.js";
+import type { HealthServer } from "./health.js";
 import { SorobanRpc } from "./rpc.js";
 import { decodeEvent } from "./decoder.js";
 
@@ -25,7 +24,9 @@ export class Indexer {
 
   constructor(
     private readonly config: Config,
-    private readonly db: ComplianceDb
+    private readonly db: ComplianceDb,
+    /** Optional health server; if provided, recordPoll() is called after each successful poll */
+    private readonly health?: HealthServer
   ) {
     this.rpc = new SorobanRpc(config.rpcUrl);
   }
@@ -51,6 +52,7 @@ export class Indexer {
   private async tick(): Promise<void> {
     try {
       await this.poll();
+      this.health?.recordPoll();
     } catch (err) {
       console.error("Poll error (will retry):", err);
     } finally {
@@ -88,18 +90,33 @@ export class Indexer {
         ? this.config.startLedger
         : await this.getEarliestAvailableLedger();
 
-    const latest = await this.rpc.getLatestLedger();
+    if (lastIndexed > 0 && startLedger !== lastIndexed + 1) {
+      const issue = startLedger < lastIndexed + 1 ? "regression" : "gap";
+      console.warn(`Ledger ${issue} detected: poll starts at ${startLedger} after checkpoint ${lastIndexed}`);
+    }
 
-    if (startLedger > latest) {
+    const latest = await this.rpc.getLatestLedger();
+    const targetLedger = this.config.endLedger > 0
+      ? Math.min(latest, this.config.endLedger)
+      : latest;
+
+    if (this.config.endLedger > 0 && lastIndexed >= this.config.endLedger) {
+      console.log(`Backfill complete through ledger ${this.config.endLedger}`);
+      this.running = false;
+      return;
+    }
+
+    if (startLedger > targetLedger) {
       // Already up to date
       return;
     }
 
-    console.log(`Fetching events ledgers ${startLedger}–${latest} (${contractIds.length} contract(s))`);
+    console.log(`Fetching events ledgers ${startLedger}–${targetLedger} (${contractIds.length} contract(s))`);
 
     // Paginate through all events in the range
     let cursor: string | undefined;
     let totalProcessed = 0;
+    let eventHorizon: number | null = null;
 
     do {
       const result = await this.rpc.getEvents({
@@ -108,7 +125,18 @@ export class Indexer {
         pagination: { limit: 200, cursor },
       });
 
+      if (result.latestLedger < lastIndexed) {
+        console.warn(`Ledger regression detected: getEvents reports ${result.latestLedger} after checkpoint ${lastIndexed}; retaining checkpoint`);
+        return;
+      }
+      if (eventHorizon !== null && result.latestLedger < eventHorizon) {
+        console.warn(`Ledger regression detected during pagination: ${result.latestLedger} after ${eventHorizon}; stopping at the last covered ledger`);
+        break;
+      }
+      eventHorizon = result.latestLedger;
+
       const decoded = result.events
+        .filter((event) => event.ledger >= startLedger && event.ledger <= targetLedger && event.ledger <= result.latestLedger)
         .map((e) => decodeEvent(e))
         .filter((e): e is NonNullable<typeof e> => e !== null);
 
@@ -123,13 +151,28 @@ export class Indexer {
       } else {
         cursor = undefined;
       }
+
+      if (this.config.endLedger > 0 && result.events.some((event) => event.ledger > targetLedger)) {
+        break;
+      }
     } while (cursor);
 
-    // Persist progress
-    this.db.setLastIndexedLedger(latest);
+    if (eventHorizon === null || eventHorizon < targetLedger) {
+      console.warn(`Ledger gap detected: requested through ${targetLedger}, but getEvents reports through ${eventHorizon ?? "no ledger"}`);
+    }
+
+    const indexedThrough = eventHorizon === null || eventHorizon < startLedger
+      ? lastIndexed
+      : Math.min(targetLedger, eventHorizon);
+    if (indexedThrough > lastIndexed) this.db.setLastIndexedLedger(indexedThrough);
 
     if (totalProcessed > 0) {
-      console.log(`Processed ${totalProcessed} event(s) through ledger ${latest}`);
+      console.log(`Processed ${totalProcessed} event(s) through ledger ${indexedThrough}`);
+    }
+
+    if (this.config.endLedger > 0 && indexedThrough >= this.config.endLedger) {
+      console.log(`Backfill complete through ledger ${this.config.endLedger}`);
+      this.running = false;
     }
   }
 

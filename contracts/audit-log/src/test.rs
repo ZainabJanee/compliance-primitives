@@ -360,3 +360,220 @@ fn test_duplicate_source_event_pair_produces_two_entries() {
         "the cross-ledger duplicate must record the new ledger sequence"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Negative-auth tests — issue #462
+//
+// `pause` and `unpause` are admin-gated.  A caller whose address does not
+// match the stored admin must receive `Error::NotAuthorized`.
+// ---------------------------------------------------------------------------
+
+/// `pause` must return `Err(Error::NotAuthorized)` when called by an address
+/// that is not the stored admin.
+#[test]
+fn test_pause_rejects_non_admin() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    let impostor = Address::generate(&env);
+    let result = client.try_pause(&impostor);
+    assert_eq!(
+        result,
+        Err(Ok(Error::NotAuthorized)),
+        "pause must reject a non-admin caller"
+    );
+}
+
+/// `unpause` must return `Err(Error::NotAuthorized)` when called by an
+/// address that is not the stored admin, even when the contract is paused.
+#[test]
+fn test_unpause_rejects_non_admin() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    // Pause the contract first (using the legitimate admin) so that the
+    // unpause path is reachable.
+    client.pause(&admin);
+
+    let impostor = Address::generate(&env);
+    let result = client.try_unpause(&impostor);
+    assert_eq!(
+        result,
+        Err(Ok(Error::NotAuthorized)),
+        "unpause must reject a non-admin caller"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Detail-length cap — issue #572
+// ---------------------------------------------------------------------------
+
+/// A `detail` string of exactly `MAX_DETAIL_LEN` bytes must be accepted.
+#[test]
+fn test_record_detail_at_max_len_is_accepted() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+
+    // Build a string of exactly MAX_DETAIL_LEN 'a' characters.
+    let detail_bytes = [b'a'; MAX_DETAIL_LEN as usize];
+    let detail_str = core::str::from_utf8(&detail_bytes).unwrap();
+    let detail = soroban_sdk::String::from_str(&env, detail_str);
+
+    let result = client.try_record(&source, &kind, &subject, &detail);
+    assert!(result.is_ok(), "exactly MAX_DETAIL_LEN bytes must be accepted");
+    assert_eq!(client.entry_count(), 1u64);
+}
+
+/// A `detail` string of `MAX_DETAIL_LEN + 1` bytes must be rejected with
+/// `Error::DetailTooLong`.
+#[test]
+fn test_record_detail_one_over_max_len_is_rejected() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+
+    // Build a string of MAX_DETAIL_LEN + 1 'a' characters.
+    let detail_bytes = [b'a'; MAX_DETAIL_LEN as usize + 1];
+    let detail_str = core::str::from_utf8(&detail_bytes).unwrap();
+    let detail = soroban_sdk::String::from_str(&env, detail_str);
+
+    let result = client.try_record(&source, &kind, &subject, &detail);
+    assert_eq!(
+        result,
+        Err(Ok(Error::DetailTooLong)),
+        "MAX_DETAIL_LEN + 1 bytes must be rejected with DetailTooLong"
+    );
+    // No entry must have been written.
+    assert_eq!(client.entry_count(), 0u64);
+}
+
+// ---------------------------------------------------------------------------
+// Resource-fee benchmark (budget regression) — `record`
+//
+// `record` is audit-log's hottest entrypoint: every state-mutating call on an
+// integrated primitive appends one entry through it. The measured CPU/memory
+// cost is compared against the `[audit-log.record]` entry in
+// `budget-baselines.toml`; the test (and therefore the `budget-regression` CI
+// job, which runs `cargo test --workspace budget_regression`) fails if either
+// exceeds the baseline by more than 10%.
+// ---------------------------------------------------------------------------
+
+fn read_baseline(path: &std::path::Path, section: &str) -> (u64, u64) {
+    let contents = std::fs::read_to_string(path).unwrap();
+    let section_header = std::format!("[{section}]");
+    let mut in_section = false;
+    let mut cpu = None;
+    let mut memory = None;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = trimmed == section_header;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("cpu = ") {
+            cpu = Some(value.replace('_', "").parse::<u64>().unwrap());
+        } else if let Some(value) = trimmed.strip_prefix("memory = ") {
+            memory = Some(value.replace('_', "").parse::<u64>().unwrap());
+        }
+    }
+
+    let cpu = cpu.expect("missing cpu baseline");
+    let memory = memory.expect("missing memory baseline");
+    (cpu, memory)
+}
+
+fn baseline_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("budget-baselines.toml")
+}
+
+fn assert_budget_within_threshold(measured: (u64, u64), baseline: (u64, u64), label: &str) {
+    let (measured_cpu, measured_memory) = measured;
+    let (baseline_cpu, baseline_memory) = baseline;
+    let cpu_limit = (baseline_cpu as f64 * 1.10).ceil() as u64;
+    let memory_limit = (baseline_memory as f64 * 1.10).ceil() as u64;
+
+    assert!(
+        measured_cpu <= cpu_limit,
+        "{label} CPU regression: measured {measured_cpu}, baseline {baseline_cpu}, limit {cpu_limit}"
+    );
+    assert!(
+        measured_memory <= memory_limit,
+        "{label} memory regression: measured {measured_memory}, baseline {baseline_memory}, limit {memory_limit}"
+    );
+}
+
+#[test]
+fn test_budget_regression_audit_log_record() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "added by compliance officer");
+
+    let mut budget = env.cost_estimate().budget();
+    budget.reset_default();
+    client.record(&source, &kind, &subject, &detail);
+    let measured = (budget.cpu_instruction_cost(), budget.memory_bytes_cost());
+
+    std::println!(
+        "audit-log.record: cpu = {}, memory = {}",
+        measured.0, measured.1
+    );
+
+    let baseline = read_baseline(&baseline_path(), "audit-log.record");
+    assert_budget_within_threshold(measured, baseline, "audit-log record");
+}
+
+// ---------------------------------------------------------------------------
+// Source-auth test — issue #369
+//
+// `record` calls `source.require_auth()`, so authorization from any other
+// address must not be enough to record an entry claiming that source.
+// ---------------------------------------------------------------------------
+
+/// `record` must fail when the only authorization provided belongs to an
+/// address other than the claimed `source`.
+#[test]
+fn test_record_rejects_auth_from_address_other_than_source() {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
+
+    let env = Env::default();
+    let (_admin, contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let other = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "spoofed source");
+
+    // Replace the blanket mock with an authorization from `other` only.
+    env.mock_auths(&[MockAuth {
+        address: &other,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "record",
+            args: (&source, &kind, &subject, &detail).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = client.try_record(&source, &kind, &subject, &detail);
+    assert!(result.is_err(), "record must fail without the source's auth");
+    assert_eq!(client.entry_count(), 0u64);
+}

@@ -36,6 +36,93 @@ fn setup(env: &Env) -> (Address, Address, Address, AllowlistTokenClient<'_>) {
     (admin, token_id, contract_id, client)
 }
 
+// ─── Budget baseline helpers ─────────────────────────────────────────────────
+
+fn read_baseline(path: &Path, section: &str) -> (u64, u64) {
+    let contents = std::fs::read_to_string(path).unwrap();
+    let section_header = format!("[{section}]");
+    let mut in_section = false;
+    let mut cpu = None;
+    let mut memory = None;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = trimmed == section_header;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("cpu = ") {
+            cpu = Some(value.parse::<u64>().unwrap());
+        } else if let Some(value) = trimmed.strip_prefix("memory = ") {
+            memory = Some(value.parse::<u64>().unwrap());
+        }
+    }
+
+    let cpu = cpu.expect("missing cpu baseline");
+    let memory = memory.expect("missing memory baseline");
+    (cpu, memory)
+}
+
+fn baseline_path_for_manifest_dir(manifest_dir: PathBuf) -> PathBuf {
+    manifest_dir.join("..").join("..").join("budget-baselines.toml")
+}
+
+fn assert_budget_within_threshold(measured: (u64, u64), baseline: (u64, u64), label: &str) {
+    let (measured_cpu, measured_memory) = measured;
+    let (baseline_cpu, baseline_memory) = baseline;
+    let cpu_limit = (baseline_cpu as f64 * 1.10).ceil() as u64;
+    let memory_limit = (baseline_memory as f64 * 1.10).ceil() as u64;
+
+    assert!(
+        measured_cpu <= cpu_limit,
+        "{label} CPU regression: measured {measured_cpu}, baseline {baseline_cpu}, limit {cpu_limit}"
+    );
+    assert!(
+        measured_memory <= memory_limit,
+        "{label} memory regression: measured {measured_memory}, baseline {baseline_memory}, limit {memory_limit}"
+    );
+}
+
+// ─── Delegated-signature helpers ─────────────────────────────────────────────
+
+fn delegated_message_bytes(env: &Env, target: &Address, nonce: u64, expiry: u64) -> Bytes {
+    let mut message = Bytes::new(env);
+    message.append(&Bytes::from_slice(env, b"allowlist-delegated-v1:"));
+    let target_str = target.to_string().to_string();
+    message.append(&Bytes::from_slice(env, target_str.as_bytes()));
+    message.push_back(b':');
+    message.append(&Bytes::from_slice(env, b"add_to_allowlist"));
+    message.push_back(b':');
+    let nonce_str = nonce.to_string();
+    message.append(&Bytes::from_slice(env, nonce_str.as_bytes()));
+    message.push_back(b':');
+    let expiry_str = expiry.to_string();
+    message.append(&Bytes::from_slice(env, expiry_str.as_bytes()));
+    message
+}
+
+fn sign_delegated_action(
+    env: &Env,
+    signing_key: &SigningKey,
+    target: &Address,
+    nonce: u64,
+    expiry: u64,
+) -> BytesN<64> {
+    let message = delegated_message_bytes(env, target, nonce, expiry);
+    let sig = signing_key.sign(&message).unwrap();
+    BytesN::from_array(env, &sig)
+}
+
+fn delegated_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[
+        0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+        23, 24, 25, 26, 27, 28, 29, 30, 31,
+    ])
+}
+
 // ─── Existing unit tests ──────────────────────────────────────────────────────
 
 #[test]
@@ -45,7 +132,7 @@ fn test_initialize_and_allowlist_roundtrip() {
     let alice = Address::generate(&env);
 
     assert!(!client.is_allowed(&alice));
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
     assert!(client.is_allowed(&alice));
     client.remove_from_allowlist(&admin, &alice);
     assert!(!client.is_allowed(&alice));
@@ -58,8 +145,8 @@ fn test_transfer_forwards_to_underlying_token_when_both_allowlisted() {
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
 
-    client.add_to_allowlist(&admin, &alice);
-    client.add_to_allowlist(&admin, &bob);
+    client.add_to_allowlist(&admin, &alice, &None);
+    client.add_to_allowlist(&admin, &bob, &None);
 
     let ok = client.transfer(&alice, &bob, &500);
     assert!(ok);
@@ -76,8 +163,8 @@ fn test_budget_regression_allowlist_transfer() {
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
 
-    client.add_to_allowlist(&admin, &alice);
-    client.add_to_allowlist(&admin, &bob);
+    client.add_to_allowlist(&admin, &alice, &None);
+    client.add_to_allowlist(&admin, &bob, &None);
 
     let mut budget = env.cost_estimate().budget();
     budget.reset_default();
@@ -91,20 +178,91 @@ fn test_budget_regression_allowlist_transfer() {
 }
 
 #[test]
+fn test_budget_regression_allowlist_add_to_allowlist() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    let mut budget = env.cost_estimate().budget();
+    budget.reset_default();
+    client.add_to_allowlist(&admin, &alice);
+
+    let measured = (budget.cpu_instruction_cost(), budget.memory_bytes_cost());
+    let baseline_path = baseline_path_for_manifest_dir(PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()));
+    let baseline = read_baseline(&baseline_path, "allowlist-token.add_to_allowlist");
+    assert_budget_within_threshold(measured, baseline, "allowlist-token add_to_allowlist");
+}
+
+#[test]
+fn test_budget_regression_allowlist_add_to_allowlist_delegated() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let signing_key = delegated_signing_key();
+    let pubkey = BytesN::from_array(&env, &signing_key.verifying_key().to_bytes());
+    client.set_delegated_admin_key(&admin, &pubkey);
+
+    let expiry = env.ledger().timestamp() + 60;
+    let signature = sign_delegated_action(&env, &signing_key, &alice, 1, expiry);
+
+    let mut budget = env.cost_estimate().budget();
+    budget.reset_default();
+    client.add_to_allowlist_delegated(&admin, &alice, &1u64, &expiry, &signature);
+
+    let measured = (budget.cpu_instruction_cost(), budget.memory_bytes_cost());
+    let baseline_path = baseline_path_for_manifest_dir(PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()));
+    let baseline = read_baseline(&baseline_path, "allowlist-token.add_to_allowlist_delegated");
+    assert_budget_within_threshold(measured, baseline, "allowlist-token add_to_allowlist_delegated");
+}
+
+/// The delegated path (ed25519 verification plus nonce/pubkey storage access)
+/// must cost more CPU than the direct-auth baseline it is compared against.
+#[test]
+fn test_delegated_add_costs_more_cpu_than_direct_add() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let signing_key = delegated_signing_key();
+    let pubkey = BytesN::from_array(&env, &signing_key.verifying_key().to_bytes());
+    client.set_delegated_admin_key(&admin, &pubkey);
+
+    let expiry = env.ledger().timestamp() + 60;
+    let signature = sign_delegated_action(&env, &signing_key, &bob, 1, expiry);
+
+    let mut budget = env.cost_estimate().budget();
+    budget.reset_default();
+    client.add_to_allowlist(&admin, &alice);
+    let direct_cpu = budget.cpu_instruction_cost();
+
+    budget.reset_default();
+    client.add_to_allowlist_delegated(&admin, &bob, &1u64, &expiry, &signature);
+    let delegated_cpu = budget.cpu_instruction_cost();
+
+    assert!(
+        delegated_cpu > direct_cpu,
+        "delegated add ({delegated_cpu} cpu) should cost more than direct add ({direct_cpu} cpu)"
+    );
+}
+
+#[test]
 fn test_transfer_blocked_when_recipient_not_allowlisted() {
     let env = Env::default();
     let (admin, _token_id, contract_id, client) = setup(&env);
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
 
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
 
     let ok = client.transfer(&alice, &bob, &500);
     assert!(!ok);
 
-    assert_eq!(
-        env.events().all(),
-        vec![
+    // `assert_events_eq` pretty-prints both the actual and expected events on
+    // mismatch instead of a single-line raw XDR dump.
+    compliance_test_trace::assert_events_eq(
+        &env,
+        &env.events().all(),
+        &vec![
             &env,
             (
                 contract_id.clone(),
@@ -117,7 +275,7 @@ fn test_transfer_blocked_when_recipient_not_allowlisted() {
                 Map::<Symbol, Val>::from_array(&env, [(symbol_short!("amount"), 500i128.into_val(&env))])
                     .into_val(&env),
             ),
-        ]
+        ],
     );
 }
 
@@ -128,7 +286,7 @@ fn test_add_to_allowlist_rejects_non_admin() {
     let impostor = Address::generate(&env);
     let alice = Address::generate(&env);
 
-    let result = client.try_add_to_allowlist(&impostor, &alice);
+    let result = client.try_add_to_allowlist(&impostor, &alice, &None);
     assert_eq!(result, Err(Ok(Error::NotAuthorized)));
     assert!(!client.is_allowed(&alice));
 }
@@ -140,11 +298,11 @@ fn test_non_admin_allowlist_mutations_rejected_end_to_end() {
     let impostor = Address::generate(&env);
     let alice = Address::generate(&env);
 
-    let add_result = client.try_add_to_allowlist(&impostor, &alice);
+    let add_result = client.try_add_to_allowlist(&impostor, &alice, &None);
     assert_eq!(add_result, Err(Ok(Error::NotAuthorized)));
     assert!(!client.is_allowed(&alice));
 
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
     assert!(client.is_allowed(&alice));
 
     let remove_result = client.try_remove_from_allowlist(&impostor, &alice);
@@ -307,7 +465,7 @@ fn test_add_to_allowlist_emits_allow_add_event() {
     let (admin, _token_id, contract_id, client) = setup(&env);
     let alice = Address::generate(&env);
 
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
 
     assert_eq!(
         env.events().all(),
@@ -327,7 +485,7 @@ fn test_remove_from_allowlist_emits_allow_remove_event() {
     let env = Env::default();
     let (admin, _token_id, contract_id, client) = setup(&env);
     let alice = Address::generate(&env);
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
 
     client.remove_from_allowlist(&admin, &alice);
 
@@ -364,7 +522,7 @@ fn test_add_to_allowlist_extends_persistent_ttl() {
     let (admin, _token_id, contract_id, client) = setup(&env);
     let alice = Address::generate(&env);
 
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
 
     env.as_contract(&contract_id, || {
         let ttl = env
@@ -393,7 +551,7 @@ fn test_add_to_allowlist_extends_persistent_ttl() {
         );
     });
 
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
     env.as_contract(&contract_id, || {
         let ttl = env
             .storage()
@@ -452,7 +610,7 @@ fn prop_allowlist_add_remove_last_write_wins() {
                 for op in &ops {
                     match *op {
                         Op::Add(i) => {
-                            client.add_to_allowlist(&admin, &addresses[i]);
+                            client.add_to_allowlist(&admin, &addresses[i], &None);
                             model[i] = true;
                         }
                         Op::Remove(i) => {
@@ -475,4 +633,155 @@ fn prop_allowlist_add_remove_last_write_wins() {
             },
         )
         .unwrap();
+}
+
+// ─── Compliance officer (#357) ───────────────────────────────────────────────
+
+#[test]
+fn test_officer_can_remove_from_allowlist_after_assignment() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let officer = Address::generate(&env);
+    let alice = Address::generate(&env);
+
+    client.add_to_allowlist(&admin, &alice);
+    client.set_compliance_officer(&admin, &officer);
+
+    client.remove_from_allowlist(&officer, &alice);
+    assert!(!client.is_allowed(&alice));
+}
+
+#[test]
+fn test_officer_cannot_assign_or_revoke_officer_role() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let officer = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    client.set_compliance_officer(&admin, &officer);
+
+    assert_eq!(
+        client.try_set_compliance_officer(&officer, &other),
+        Err(Ok(Error::NotAuthorized))
+    );
+    assert_eq!(
+        client.try_revoke_compliance_officer(&officer),
+        Err(Ok(Error::NotAuthorized))
+    );
+}
+
+#[test]
+fn test_officer_cannot_add_to_allowlist() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let officer = Address::generate(&env);
+    let alice = Address::generate(&env);
+
+    client.set_compliance_officer(&admin, &officer);
+
+    assert_eq!(
+        client.try_add_to_allowlist(&officer, &alice),
+        Err(Ok(Error::NotAuthorized))
+    );
+    assert!(!client.is_allowed(&alice));
+}
+
+#[test]
+fn test_revoked_officer_can_no_longer_remove_from_allowlist() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let officer = Address::generate(&env);
+    let alice = Address::generate(&env);
+
+    client.add_to_allowlist(&admin, &alice);
+    client.set_compliance_officer(&admin, &officer);
+    client.revoke_compliance_officer(&admin);
+
+    assert_eq!(
+        client.try_remove_from_allowlist(&officer, &alice),
+        Err(Ok(Error::NotAuthorized))
+    );
+    assert!(client.is_allowed(&alice));
+}
+
+// ─── Pause / unpause / is_paused (#358) ──────────────────────────────────────
+
+#[test]
+fn test_transfer_blocked_while_paused_and_succeeds_after_unpause() {
+    let env = Env::default();
+    let (admin, token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &bob);
+
+    assert!(!client.is_paused());
+    client.pause(&admin);
+    assert!(client.is_paused());
+    assert_eq!(
+        client.try_transfer(&alice, &bob, &10),
+        Err(Ok(Error::ContractPaused))
+    );
+
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+    assert!(client.transfer(&alice, &bob, &10));
+    let token = MockTokenClient::new(&env, &token_id);
+    assert_eq!(token.last_transfer(), Some((alice, bob, 10)));
+}
+
+#[test]
+fn test_pause_does_not_block_allowlist_mutations() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice);
+
+    client.pause(&admin);
+
+    client.add_to_allowlist(&admin, &bob);
+    assert!(client.is_allowed(&bob));
+    client.remove_from_allowlist(&admin, &alice);
+    assert!(!client.is_allowed(&alice));
+}
+
+#[test]
+fn test_pause_and_unpause_reject_non_admin() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let impostor = Address::generate(&env);
+
+    assert_eq!(client.try_pause(&impostor), Err(Ok(Error::NotAuthorized)));
+    assert!(!client.is_paused());
+
+    client.pause(&admin);
+    assert_eq!(client.try_unpause(&impostor), Err(Ok(Error::NotAuthorized)));
+    assert!(client.is_paused());
+}
+
+// ─── get_delegated_nonce (#359) ──────────────────────────────────────────────
+
+#[test]
+fn test_get_delegated_nonce_is_zero_before_any_delegated_call() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+
+    assert_eq!(client.get_delegated_nonce(&admin), 0);
+}
+
+#[test]
+fn test_get_delegated_nonce_returns_last_used_nonce() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let signing_key = delegated_signing_key();
+    let pubkey = BytesN::from_array(&env, &signing_key.verifying_key().to_bytes());
+    client.set_delegated_admin_key(&admin, &pubkey);
+
+    let expiry = env.ledger().timestamp() + 60;
+    let signature = sign_delegated_action(&env, &signing_key, &alice, 7, expiry);
+    client.add_to_allowlist_delegated(&admin, &alice, &7u64, &expiry, &signature);
+
+    assert_eq!(client.get_delegated_nonce(&admin), 7);
 }

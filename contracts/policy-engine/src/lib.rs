@@ -1,6 +1,49 @@
 //! `policy-engine` is a `#![no_std]` Soroban contract that composes multiple
 //! compliance checks into a single policy evaluation call.
 //!
+//! ## Purpose
+//!
+//! Each compliance primitive in this workspace answers one narrow question
+//! about an address ("is it denylisted?", "is it in a permitted
+//! jurisdiction?", "is it allowlisted?"). Real issuance policies are rarely
+//! that narrow: they combine several of those answers with AND / OR logic
+//! and must be changeable as regulation evolves. `policy-engine` holds that
+//! composition on-chain, so a token contract makes **one** call —
+//! `evaluate(from, to)` — and gets back a single pass/fail decision for the
+//! whole policy, instead of hard-coding a sequence of cross-contract calls
+//! that would need a redeploy every time the policy changes.
+//!
+//! ## Who calls it
+//!
+//! - **Token / transfer contracts** (the primary callers) invoke
+//!   `evaluate(from, to)` or `batch_evaluate(pairs)` before moving value and
+//!   refuse the transfer when the result is `false`. These calls are
+//!   permissionless and require no auth.
+//! - **The policy admin** (an issuer key or, preferably, a `multisig-admin`
+//!   contract address) calls `initialize`, `add_check`, `remove_check` and
+//!   `set_circuit_breaker` to manage the policy. Every mutation requires the
+//!   stored admin's auth.
+//! - **Off-chain tooling and auditors** call the read-only views
+//!   (`get_checks`, `get_op`, `get_policy`, `circuit_breaker`) and consume
+//!   the `PolicyResult` event stream to reconstruct every decision.
+//!
+//! ## How it composes with the other contracts
+//!
+//! | Contract | Relationship to `policy-engine` |
+//! |---|---|
+//! | `denylist-gate` | Registered as a [`CheckKind::Denylist`] check; `evaluate` calls its `check(address)`. |
+//! | `jurisdiction-flag` | Registered as a [`CheckKind::Jurisdiction`] check; `evaluate` calls `is_permitted_jurisdiction(address, allowed_codes)`. |
+//! | `allowlist-token` | Registered as a [`CheckKind::Allowlist`] check; `evaluate` calls its `is_allowed(address)`. |
+//! | `circuit-breaker` | Optional emergency stop. When configured and frozen, `evaluate` denies outright without running any check. |
+//! | `multisig-admin` | Recommended value for the `admin` address, so policy changes require M-of-N approval via `__check_auth`. |
+//! | `pausable` | Shared crate used to guard admin mutations (`add_check`, `remove_check`) while the contract is paused. |
+//! | `audit-log` | Complementary: integrators that need an on-chain, contract-readable trail of policy changes record them there; `policy-engine` itself only emits events. |
+//! | `compliance-aggregator` | Sibling, not a dependency. The aggregator is a fixed AND-only fan-out optimised for call overhead; `policy-engine` is the configurable AND / OR layer. Pick one per integration. |
+//!
+//! The primitives are called through locally declared `#[contractclient]`
+//! interfaces rather than direct crate dependencies, so any contract that
+//! exposes the same function signature can be plugged in as a check.
+//!
 //! ## AND / OR design choice
 //!
 //! Compliance use cases almost always reduce to one of two logical shapes:
@@ -31,14 +74,24 @@
 //!
 //! ## Upgradeability
 //!
-//! `upgrade(admin, new_wasm_hash)` lets the configured admin move the
-//! contract's code to a new WASM hash via
-//! `env.deployer().update_current_contract_wasm`, following the same
-//! admin-gated pattern used elsewhere in the repo (see `jurisdiction-flag`).
-//! Storage (the admin key, `CombineOp`, and the registered `Checks` vec) is
-//! untouched by the WASM swap, so all state is preserved and the contract
-//! remains fully callable immediately after the upgrade. Only the admin can
-//! call `upgrade`; any other caller is rejected with `Error::NotAuthorized`.
+//! The admin can propose an upgrade with `propose_upgrade(admin, new_wasm,
+//! delay_ledgers)`. It can only be installed with `commit_upgrade` after the
+//! delay expires, and the admin can call `cancel_upgrade` during that window.
+//! The WASM swap preserves contract storage, including the admin, policy, and
+//! checks. A successful commit emits `UpgradePerformed`.
+//!
+//! ## Storage and TTL policy
+//!
+//! All state (admin, `CombineOp`, the `Checks` vec and the optional
+//! circuit-breaker address) lives in **instance** storage, which shares a
+//! single TTL with the contract instance itself. Every write path
+//! (`initialize`, `set_circuit_breaker`, `add_check`, `remove_check`,
+//! `propose_upgrade`, `cancel_upgrade`)
+//! finishes by extending that TTL: whenever the remaining TTL has dropped
+//! below [`INSTANCE_TTL_THRESHOLD`] (~7 days) it is bumped back up to
+//! [`INSTANCE_TTL_EXTEND_TO`] (~90 days). This keeps the policy from being
+//! archived by Soroban state expiration — an archived policy would make
+//! `evaluate` unreachable until a manual restore.
 #![no_std]
 
 use soroban_sdk::{
@@ -74,6 +127,13 @@ pub trait CircuitBreakerInterface {
     fn is_frozen(env: Env) -> bool;
 }
 
+/// Describes the `allowlist-token` contract interface used for the policy
+/// engine's allowlist check.
+#[contractclient(name = "AllowlistCheckClient")]
+pub trait AllowlistCheckInterface {
+    fn is_allowed(env: Env, address: Address) -> bool;
+}
+
 // ---------------------------------------------------------------------------
 // Storage types
 // ---------------------------------------------------------------------------
@@ -104,13 +164,68 @@ pub struct AllowlistCheck {
     pub contract: Address,
 }
 
+/// Parameters for a circuit-breaker check.
+///
+/// When this check is evaluated, the engine calls `is_frozen()` on the
+/// configured circuit-breaker contract. The check **passes** only when the
+/// circuit-breaker is **not** frozen (i.e. the emergency stop has not been
+/// triggered). This lets an issuer compose an explicit "is the system
+/// live?" gate alongside denylist and jurisdiction rules inside a single
+/// policy tree, rather than relying solely on the top-level circuit-breaker
+/// short-circuit in `evaluate`.
+#[contracttype]
+#[derive(Clone)]
+pub struct CircuitBreakerCheck {
+    /// Address of the deployed `circuit-breaker` contract to call.
+    pub contract: Address,
+}
+
 /// Describes a single compliance check the engine should perform.
 ///
 /// Each variant carries the address of the external contract that implements
 /// the check plus any parameters that check needs.
 ///
-/// Note: `#[contracttype]` only supports tuple variants (not named struct
-/// variants). Each variant wraps a dedicated parameter struct.
+/// ## `#[contracttype]` enum variant shape restriction
+///
+/// The Soroban SDK's `#[contracttype]` macro (pinned in this workspace) only
+/// supports **unit** or **single-tuple** enum variants. Named-field variants
+/// such as:
+///
+/// ```ignore
+/// // ❌ Does NOT compile with #[contracttype]
+/// pub enum CheckKind {
+///     Jurisdiction { contract: Address, allowed_codes: Vec<String> },
+/// }
+/// ```
+///
+/// are rejected by the macro with a compile error. This is a known limitation
+/// of the XDR-based storage encoding used by Soroban: each variant is stored
+/// as a tagged union, and named fields would require an extra layer of
+/// encoding that the macro does not generate.
+///
+/// **The correct pattern** is to wrap multi-field parameters in a dedicated
+/// `#[contracttype]` struct and use a single-tuple variant:
+///
+/// ```ignore
+/// // ✅ Correct: wrap multi-field params in a struct
+/// #[contracttype]
+/// pub struct JurisdictionCheck {
+///     pub contract: Address,
+///     pub allowed_codes: Vec<String>,
+/// }
+///
+/// #[contracttype]
+/// pub enum CheckKind {
+///     Jurisdiction(JurisdictionCheck),  // single-tuple variant — compiles
+/// }
+/// ```
+///
+/// If you add a new `CheckKind` variant that needs multiple parameters, follow
+/// this same pattern: define a `#[contracttype]` struct for the parameters,
+/// then add a single-tuple variant wrapping that struct. **Do not** attempt to
+/// use named-field variants, even if a future contributor believes the SDK now
+/// supports them — verify against the pinned SDK version in `Cargo.toml`
+/// before changing this shape.
 #[contracttype]
 #[derive(Clone)]
 pub enum CheckKind {
@@ -124,11 +239,16 @@ pub enum CheckKind {
     /// Call `allowlist-token.is_allowed(address)`. The address must be
     /// present on the allowlist for this check to pass.
     Allowlist(AllowlistCheck),
+    /// Call `circuit-breaker.is_frozen()`. The check passes only when the
+    /// circuit-breaker is **not** frozen. Use this to embed an emergency-stop
+    /// gate directly in the policy tree so a single call to `evaluate`
+    /// covers the full compliance stack including the freeze check.
+    CircuitBreaker(CircuitBreakerCheck),
 }
 
 /// How the engine combines the results of multiple checks.
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CombineOp {
     /// AND — every check must pass. Used when an address must satisfy all
     /// compliance requirements simultaneously.
@@ -156,6 +276,15 @@ enum DataKey {
     /// Address of the `circuit-breaker` contract to consult, if any. When
     /// set and frozen, `evaluate` short-circuits to deny.
     CircuitBreaker,
+    PendingUpgrade,
+}
+
+/// Delayed upgrade proposal state.
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeState {
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +313,16 @@ pub enum Error {
     /// exceed `MAX_CHECKS`. Keeps per-evaluation resource cost bounded and
     /// prevents unbounded storage growth.
     MaxDepthExceeded = 5,
+    /// Returned by `swap_checks` when either index `i` or `j` is out of
+    /// range for the current check list.
+    IndexOutOfBounds = 6,
+    /// Returned by state-changing entry points while the contract is paused.
+    ContractPaused = 7,
+    /// Returned by `get_check` when the requested index is out of range.
+    CheckIndexOutOfRange = 8,
+    /// Returned by `commit_upgrade` when no upgrade is pending or its delay
+    /// has not elapsed.
+    UpgradeNotReady = 9,
 }
 
 /// Maximum number of checks that can be registered in a single policy
@@ -191,6 +330,14 @@ pub enum Error {
 /// overhead well within Soroban's instruction limits while still supporting
 /// all realistic compliance stack sizes.
 pub const MAX_CHECKS: u32 = 16;
+
+/// Extend the contract's instance storage when its remaining TTL drops below
+/// this many ledgers (~7 days at ~5s/ledger).
+pub const INSTANCE_TTL_THRESHOLD: u32 = 120_960;
+
+/// Target remaining TTL, in ledgers, after an extension (~90 days at
+/// ~5s/ledger).
+pub const INSTANCE_TTL_EXTEND_TO: u32 = 1_555_200;
 
 /// Emitted by `evaluate` regardless of the pass/fail outcome so that
 /// off-chain compliance tooling can build a full audit trail even when the
@@ -212,14 +359,72 @@ pub struct UpgradePerformed {
 }
 
 /// Carries information about which check in the list failed and what kind it
-/// was. Serializable on-chain; can be embedded in future error events or
-/// returned from an extended evaluate variant.
+/// was. Serializable on-chain, so it can be embedded in contract events or
+/// returned from view calls.
+///
+/// ## Intended use
+///
+/// `CheckFailure` is the payload surfaced by [`PolicyEngine::evaluate_verbose`],
+/// an extended variant of `evaluate` that returns the index and kind of the
+/// **first** check that caused the policy to fail, in addition to the overall
+/// pass/fail result. This makes it possible to diagnose a failed policy
+/// evaluation without re-running each check individually in a separate call.
+///
+/// ### Design sketch
+///
+/// ```text
+/// evaluate_verbose(env, from, to)
+///   -> Result<(bool, Option<CheckFailure>), Error>
+/// ```
+///
+/// - When the policy **passes**, the second element is `None`.
+/// - When the policy **fails**, the second element is `Some(CheckFailure)`
+///   where `check_index` is the zero-based position of the first failing check
+///   in the registered `Vec<CheckKind>` and `kind` is a `Symbol` naming the
+///   variant (e.g. `Symbol::new(env, "Denylist")`).
+///
+/// Off-chain tooling (block explorers, compliance dashboards) can call
+/// `evaluate_verbose` once and immediately know both the outcome and, on
+/// failure, precisely which rule triggered the rejection — without needing to
+/// reconstruct the full check list from storage.
+///
+/// ### Why `Option<CheckFailure>` instead of embedding in the error
+///
+/// `evaluate` deliberately returns `Ok(false)` on a policy failure rather than
+/// `Err(...)` so that the emitted `PolicyResult` event is not rolled back (see
+/// the module-level doc comment for the full rationale). `evaluate_verbose`
+/// preserves this invariant: the `CheckFailure` detail rides in the `Ok(…)`
+/// payload alongside the bool, keeping events auditable while surfacing richer
+/// diagnostic data to callers.
+///
+/// ### Tracking
+///
+/// `evaluate_verbose` is implemented in this contract. See the
+/// `evaluate_verbose` function below. Future work could extend `CheckFailure`
+/// with additional fields (e.g. the address that failed, or the full
+/// `CheckKind` payload) if callers need more context.
 #[contracttype]
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct CheckFailure {
+    /// Zero-based index into the `Vec<CheckKind>` of the first failing check.
     pub check_index: u32,
+    /// Short `Symbol` name of the `CheckKind` variant that failed, e.g.
+    /// `"Denylist"`, `"Jurisdiction"`, `"Allowlist"`, or `"CircuitBreaker"`.
     pub kind: Symbol,
+}
+
+/// A snapshot of the full policy configuration: the combination operator and
+/// the ordered list of registered checks.
+///
+/// Returned by [`PolicyEngine::get_policy`] so off-chain tooling and auditors
+/// can read back the complete policy in a single view call.
+#[contracttype]
+#[derive(Clone)]
+pub struct PolicyNode {
+    /// How check results are combined (`All` = AND, `Any` = OR).
+    pub op: CombineOp,
+    /// The ordered list of checks that `evaluate` will run.
+    pub checks: Vec<CheckKind>,
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +462,7 @@ impl PolicyEngine {
                 .instance()
                 .set(&DataKey::CircuitBreaker, &breaker);
         }
+        Self::extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -267,12 +473,59 @@ impl PolicyEngine {
         env.storage()
             .instance()
             .set(&DataKey::CircuitBreaker, &breaker);
+        Self::extend_instance_ttl(&env);
         Ok(())
     }
 
     /// Returns the currently registered `circuit-breaker` address, if any.
     pub fn circuit_breaker(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::CircuitBreaker)
+    }
+
+    /// Propose an upgrade to an uploaded Wasm hash. The admin may cancel it
+    /// before `delay_ledgers` have elapsed.
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm: BytesN<32>,
+        delay_ledgers: u32,
+    ) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        let state = UpgradeState {
+            new_wasm,
+            activated_at: u64::from(env.ledger().sequence())
+                .saturating_add(delay_ledgers as u64),
+        };
+        env.storage().instance().set(&DataKey::PendingUpgrade, &state);
+        Self::extend_instance_ttl(&env);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("upgprop"),), (admin, delay_ledgers));
+        Ok(())
+    }
+
+    /// Commit a pending upgrade after its delay has elapsed.
+    pub fn commit_upgrade(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        let state: UpgradeState = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(Error::UpgradeNotReady)?;
+        if u64::from(env.ledger().sequence()) < state.activated_at {
+            return Err(Error::UpgradeNotReady);
+        }
+        env.deployer().update_current_contract_wasm(state.new_wasm);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        UpgradePerformed { admin }.publish(&env);
+        Ok(())
+    }
+
+    /// Cancel a pending upgrade. Admin-only.
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        Self::extend_instance_ttl(&env);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -297,6 +550,7 @@ impl PolicyEngine {
         }
         checks.push_back(check);
         env.storage().instance().set(&DataKey::Checks, &checks);
+        Self::extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -310,8 +564,53 @@ impl PolicyEngine {
             .instance()
             .get(&DataKey::Checks)
             .ok_or(Error::NotInitialized)?;
+        if index >= checks.len() {
+            return Err(Error::IndexOutOfBounds);
+        }
         checks.remove(index);
         env.storage().instance().set(&DataKey::Checks, &checks);
+        Self::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Swap the checks at positions `i` and `j` in the policy list.
+    /// Admin-only.
+    ///
+    /// Issuers can use this to reorder checks without having to remove and
+    /// re-add them (which would also change their indices). A common use case
+    /// is placing the cheapest check first so it short-circuits early under
+    /// `CombineOp::All`, avoiding unnecessary cross-contract calls.
+    ///
+    /// Returns `Err(Error::IndexOutOfBounds)` if either index is out of range.
+    /// No-ops if `i == j`.
+    pub fn swap_checks(env: Env, admin: Address, i: u32, j: u32) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        if i == j {
+            return Ok(());
+        }
+        let mut checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        let len = checks.len();
+        if i >= len || j >= len {
+            return Err(Error::IndexOutOfBounds);
+        }
+        let check_i = checks.get(i).unwrap();
+        let check_j = checks.get(j).unwrap();
+        checks.set(i, check_j);
+        checks.set(j, check_i);
+        env.storage().instance().set(&DataKey::Checks, &checks);
+        Ok(())
+    }
+
+    /// Remove every configured check in one call. Admin-only.
+    pub fn clear_checks(env: Env, admin: Address) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
+        Self::require_admin(&env, &admin)?;
+        let empty: Vec<CheckKind> = Vec::new(&env);
+        env.storage().instance().set(&DataKey::Checks, &empty);
         Ok(())
     }
 
@@ -328,24 +627,6 @@ impl PolicyEngine {
     /// on-chain regardless of the result. `Err` is returned only for
     /// configuration failures (e.g. the contract was never initialized).
     pub fn evaluate(env: Env, from: Address, to: Address) -> Result<bool, Error> {
-        // Emergency freeze short-circuit: if a configured circuit-breaker is
-        // frozen, deny outright without evaluating any registered checks.
-        let breaker_addr: Option<Address> = env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::CircuitBreaker);
-        if let Some(addr) = breaker_addr {
-            if CircuitBreakerClient::new(&env, &addr).is_frozen() {
-                PolicyResult {
-                    passed: false,
-                    from: from.clone(),
-                    to: to.clone(),
-                }
-                .publish(&env);
-                return Ok(false);
-            }
-        }
-
         let checks: Vec<CheckKind> = env
             .storage()
             .instance()
@@ -356,49 +637,7 @@ impl PolicyEngine {
             .instance()
             .get(&DataKey::CombineOp)
             .ok_or(Error::NotInitialized)?;
-
-        let passed = match op {
-            CombineOp::All => {
-                // All checks must pass for both from and to.
-                let mut all_pass = true;
-                for i in 0..checks.len() {
-                    let check = checks.get(i).unwrap();
-                    if !Self::run_check(&env, &check, &from)
-                        || !Self::run_check(&env, &check, &to)
-                    {
-                        all_pass = false;
-                        break;
-                    }
-                }
-                all_pass
-            }
-            CombineOp::Any => {
-                // At least one check must pass for both from and to.
-                if checks.is_empty() {
-                    false
-                } else {
-                    let mut any_pass = false;
-                    for i in 0..checks.len() {
-                        let check = checks.get(i).unwrap();
-                        if Self::run_check(&env, &check, &from)
-                            && Self::run_check(&env, &check, &to)
-                        {
-                            any_pass = true;
-                            break;
-                        }
-                    }
-                    any_pass
-                }
-            }
-        };
-
-        PolicyResult {
-            passed,
-            from: from.clone(),
-            to: to.clone(),
-        }
-        .publish(&env);
-
+        let (passed, _) = Self::evaluate_inner(&env, &checks, &op, &from, &to);
         Ok(passed)
     }
 
@@ -406,17 +645,167 @@ impl PolicyEngine {
     ///
     /// Returns a `Vec<bool>` containing the pass/fail status for each pair in the same order.
     pub fn batch_evaluate(env: Env, pairs: Vec<AddressPair>) -> Result<Vec<bool>, Error> {
+        let checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        let op: CombineOp = env
+            .storage()
+            .instance()
+            .get(&DataKey::CombineOp)
+            .ok_or(Error::NotInitialized)?;
         let mut results = Vec::new(&env);
         for pair in pairs.iter() {
-            let res = Self::evaluate(env.clone(), pair.from, pair.to)?;
-            results.push_back(res);
+            let (passed, _) = Self::evaluate_inner(&env, &checks, &op, &pair.from, &pair.to);
+            results.push_back(passed);
         }
         Ok(results)
+    }
+
+    /// Like `evaluate`, but on failure also returns a [`CheckFailure`]
+    /// describing the **first** check that caused the policy to fail.
+    ///
+    /// Returns `Ok((true, None))` when the policy passes. Returns
+    /// `Ok((false, Some(CheckFailure { check_index, kind })))` when the
+    /// policy fails, giving callers the zero-based index and the `Symbol`
+    /// name of the failing check kind without needing a second round-trip.
+    ///
+    /// A `PolicyResult` event is emitted just as in `evaluate`, keeping the
+    /// audit trail intact regardless of the outcome. The circuit-breaker
+    /// short-circuit (if configured) is still respected and produces
+    /// `Ok((false, None))` — no index is surfaced in that case because the
+    /// freeze is a system-wide condition rather than a per-check failure.
+    pub fn evaluate_verbose(
+        env: Env,
+        from: Address,
+        to: Address,
+    ) -> Result<(bool, Option<CheckFailure>), Error> {
+        let checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        let op: CombineOp = env
+            .storage()
+            .instance()
+            .get(&DataKey::CombineOp)
+            .ok_or(Error::NotInitialized)?;
+        let result = Self::evaluate_inner(&env, &checks, &op, &from, &to);
+        Ok(result)
+    }
+
+    fn evaluate_inner(
+        env: &Env,
+        checks: &Vec<CheckKind>,
+        op: &CombineOp,
+        from: &Address,
+        to: &Address,
+    ) -> (bool, Option<CheckFailure>) {
+        let breaker_addr: Option<Address> = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::CircuitBreaker);
+        if let Some(addr) = breaker_addr {
+            if CircuitBreakerClient::new(env, &addr).is_frozen() {
+                PolicyResult {
+                    passed: false,
+                    from: from.clone(),
+                    to: to.clone(),
+                }
+                .publish(env);
+                return (false, None);
+            }
+        }
+
+        let result = match op {
+            CombineOp::All => {
+                let mut result = (true, None);
+                for i in 0..checks.len() {
+                    let check = checks.get(i).unwrap();
+                    if !Self::run_check(env, &check, from) || !Self::run_check(env, &check, to) {
+                        result = (
+                            false,
+                            Some(CheckFailure {
+                                check_index: i,
+                                kind: Self::check_kind_symbol(env, &check),
+                            }),
+                        );
+                        break;
+                    }
+                }
+                result
+            }
+            CombineOp::Any => {
+                if checks.is_empty() {
+                    (false, None)
+                } else {
+                    let mut any_pass = false;
+                    for i in 0..checks.len() {
+                        let check = checks.get(i).unwrap();
+                        if Self::run_check(env, &check, from) && Self::run_check(env, &check, to) {
+                            any_pass = true;
+                            break;
+                        }
+                    }
+                    if any_pass {
+                        (true, None)
+                    } else {
+                        let first = checks.get(0).unwrap();
+                        (
+                            false,
+                            Some(CheckFailure {
+                                check_index: 0,
+                                kind: Self::check_kind_symbol(env, &first),
+                            }),
+                        )
+                    }
+                }
+            }
+        };
+
+        PolicyResult {
+            passed: result.0,
+            from: from.clone(),
+            to: to.clone(),
+        }
+        .publish(env);
+        result
     }
 
     // -----------------------------------------------------------------------
     // Read-only accessors
     // -----------------------------------------------------------------------
+
+    /// Returns the check at position `index` in the registered policy list,
+    /// or `Err(Error::CheckIndexOutOfRange)` if `index` is out of range.
+    ///
+    /// This is more efficient than `get_checks()` when a caller only needs a
+    /// single entry (e.g. to inspect or display the config of one rule in a
+    /// UI), because it avoids deserializing and returning the entire
+    /// `Vec<CheckKind>` — especially important as the list grows toward
+    /// `MAX_CHECKS`.
+    pub fn get_check(env: Env, index: u32) -> Result<CheckKind, Error> {
+        let checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        checks.get(index).ok_or(Error::CheckIndexOutOfRange)
+    }
+
+    /// Returns the current admin address, or `Err(Error::NotInitialized)` if
+    /// the contract has not yet been initialized.
+    ///
+    /// Useful for off-chain tooling, UIs, and other contracts that need to
+    /// verify who controls this policy-engine instance without having to
+    /// replay the initialization transaction.
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)
+    }
 
     /// Returns the current list of registered checks.
     pub fn get_checks(env: Env) -> Vec<CheckKind> {
@@ -469,13 +858,45 @@ impl PolicyEngine {
             }
             CheckKind::Jurisdiction(params) => {
                 let client = JurisdictionCheckClient::new(env, &params.contract);
-                client.is_permitted_jurisdiction(address, &params.allowed_codes)
+                // A callee error (e.g. `EmptyAllowedCodes`) fails the check.
+                matches!(
+                    client.try_is_permitted_jurisdiction(address, &params.allowed_codes),
+                    Ok(Ok(true))
+                )
             }
             CheckKind::Allowlist(params) => {
                 let client = AllowlistCheckClient::new(env, &params.contract);
                 client.is_allowed(address)
             }
+            CheckKind::CircuitBreaker(params) => {
+                // The circuit-breaker check is address-independent: it reflects
+                // the global freeze state of the system. The check passes only
+                // when the breaker is NOT frozen.
+                let _ = address; // address not used for this check kind
+                let client = CircuitBreakerClient::new(env, &params.contract);
+                !client.is_frozen()
+            }
         }
+    }
+
+    /// Returns a short `Symbol` naming the `CheckKind` variant for use in
+    /// `CheckFailure`. Kept in sync with the enum variants.
+    fn check_kind_symbol(env: &Env, check: &CheckKind) -> Symbol {
+        match check {
+            CheckKind::Denylist(_) => Symbol::new(env, "Denylist"),
+            CheckKind::Jurisdiction(_) => Symbol::new(env, "Jurisdiction"),
+            CheckKind::Allowlist(_) => Symbol::new(env, "Allowlist"),
+            CheckKind::CircuitBreaker(_) => Symbol::new(env, "CircuitBreaker"),
+        }
+    }
+
+    /// Refresh the TTL of the contract instance (and therefore of every
+    /// instance-storage entry). See the "Storage and TTL policy" section of
+    /// the module docs.
+    fn extend_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
     fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {
@@ -500,4 +921,7 @@ mod test;
 
 #[cfg(test)]
 mod fuzz;
+
+#[cfg(test)]
+mod bench;
 

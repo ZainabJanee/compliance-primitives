@@ -1,0 +1,77 @@
+name: Scheduled Workspace Build & Test
+
+# Runs the full workspace build and test suite against the tip of `main`,
+# independent of any single PR's diff. Two PRs can each pass their own CI and
+# still fail to compose once merged; this job catches that.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Daily at 03:00 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  workspace:
+    name: cargo check + test (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+      - name: Test workspace
+        run: cargo test --workspace
+      - name: Open or update tracking issue if main is red
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueTitle = '[CI] Workspace build/test on main is failing';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const issueBody = 'The scheduled workspace job (`cargo check --workspace --all-targets` and `cargo test --workspace`) failed against the tip of `main`.\n\nThis usually means two individually-green PRs do not compose. Please review the run output and fix `main`.';
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'ci-main-red'
+            });
+
+            const existingIssue = issues.data.find(issue => issue.title === issueTitle);
+
+            if (existingIssue) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `Scheduled workspace job still failing on ${new Date().toISOString()}\n\nRun: ${runUrl}`
+              });
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: issueBody + `\n\nRun: ${runUrl}`,
+                labels: ['ci-main-red']
+              });
+              // Pinning needs elevated permissions; the issue is still created if it is denied.
+              try {
+                await github.graphql(
+                  `mutation($id: ID!) { pinIssue(input: { issueId: $id }) { issue { number } } }`,
+                  { id: created.data.node_id }
+                );
+              } catch (e) {
+                core.warning(`Could not pin tracking issue: ${e.message}`);
+              }
+            }

@@ -115,7 +115,11 @@ impl ExampleToken {
             .ok_or(Error::NotInitialized)?;
         let flag = FlagClient::new(&env, &flag_address);
 
-        if !flag.is_permitted_jurisdiction(&from, &allowed_codes) {
+        let permitted = matches!(
+            flag.try_is_permitted_jurisdiction(&from, &allowed_codes),
+            Ok(Ok(true))
+        );
+        if !permitted {
             return Err(Error::JurisdictionNotPermitted);
         }
 
