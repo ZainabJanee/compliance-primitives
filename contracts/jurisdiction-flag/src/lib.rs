@@ -59,6 +59,8 @@ enum DataKey {
     /// never expires.
     ValidUntil(Address),
     Paused,
+    /// Pending issuer address proposed via `propose_issuer`. Instance storage.
+    PendingIssuer,
 }
 
 /// Emitted whenever a jurisdiction flag is set.
@@ -91,6 +93,22 @@ pub struct IssuerTransferred {
     pub new_issuer: Address,
 }
 
+/// Emitted when `propose_issuer` is called.
+#[contractevent]
+pub struct IssuerProposed {
+    #[topic]
+    pub current_issuer: Address,
+    #[topic]
+    pub proposed_issuer: Address,
+}
+
+/// Emitted when the current issuer cancels a pending proposal.
+#[contractevent]
+pub struct IssuerProposalCancelled {
+    #[topic]
+    pub issuer: Address,
+}
+
 #[contractevent]
 pub struct Paused {
     #[topic]
@@ -119,6 +137,11 @@ pub enum Error {
     InvalidJurisdictionCode = 6,
     /// The `allowed_codes` list passed to `is_permitted_jurisdiction` was empty.
     EmptyAllowedCodes = 7,
+    /// `accept_issuer` was called when no transfer is in progress.
+    NoPendingIssuer = 8,
+    /// The address calling `accept_issuer` does not match the pending issuer
+    /// stored by `propose_issuer`.
+    PendingIssuerMismatch = 9,
 }
 
 #[contract]
@@ -167,11 +190,68 @@ impl JurisdictionFlag {
     ) -> Result<(), Error> {
         Self::require_issuer(&env, &current_issuer)?;
         env.storage().instance().set(&DataKey::Issuer, &new_issuer);
+        // Clear any outstanding proposal so a stale proposed address cannot
+        // accept after this rotation.
+        env.storage().instance().remove(&DataKey::PendingIssuer);
         IssuerTransferred {
             old_issuer: current_issuer,
             new_issuer,
         }
         .publish(&env);
+        Ok(())
+    }
+
+    /// Propose a new issuer. The current issuer retains full control until
+    /// the proposed issuer calls `accept_issuer`, so a typo in `new_issuer`
+    /// cannot permanently lose control of the contract. Calling it again
+    /// overwrites any pending proposal; `transfer_issuer` (single-step
+    /// break-glass rotation) also clears it.
+    pub fn propose_issuer(env: Env, issuer: Address, new_issuer: Address) -> Result<(), Error> {
+        Self::require_issuer(&env, &issuer)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingIssuer, &new_issuer);
+        IssuerProposed {
+            current_issuer: issuer,
+            proposed_issuer: new_issuer,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Accept a pending issuer proposal. Must be called by the exact address
+    /// passed to `propose_issuer`; it becomes the issuer and the proposal is
+    /// cleared.
+    pub fn accept_issuer(env: Env, new_issuer: Address) -> Result<(), Error> {
+        new_issuer.require_auth();
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingIssuer)
+            .ok_or(Error::NoPendingIssuer)?;
+        if pending != new_issuer {
+            return Err(Error::PendingIssuerMismatch);
+        }
+        let old_issuer: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Issuer)
+            .ok_or(Error::NotInitialized)?;
+        env.storage().instance().set(&DataKey::Issuer, &new_issuer);
+        env.storage().instance().remove(&DataKey::PendingIssuer);
+        IssuerTransferred {
+            old_issuer,
+            new_issuer,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Cancel a pending issuer proposal. Issuer-only.
+    pub fn cancel_issuer_proposal(env: Env, issuer: Address) -> Result<(), Error> {
+        Self::require_issuer(&env, &issuer)?;
+        env.storage().instance().remove(&DataKey::PendingIssuer);
+        IssuerProposalCancelled { issuer }.publish(&env);
         Ok(())
     }
 

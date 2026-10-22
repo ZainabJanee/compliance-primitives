@@ -723,3 +723,188 @@ fn test_set_multiple_jurisdictions_empty_code_is_invalid() {
     assert_eq!(result, Err(Ok(Error::InvalidJurisdictionCode)));
     assert_eq!(client.get_jurisdiction(&alice), None);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #603: two-step issuer transfer (propose / accept / cancel)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_propose_then_accept_issuer_transfers_control() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let new_issuer = Address::generate(&env);
+    let alice = Address::generate(&env);
+
+    client.propose_issuer(&issuer, &new_issuer);
+    client.accept_issuer(&new_issuer);
+
+    // Old issuer no longer has control.
+    let result = client.try_set_jurisdiction(&issuer, &alice, &String::from_str(&env, "US"));
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+
+    // New issuer does.
+    client.set_jurisdiction(&new_issuer, &alice, &String::from_str(&env, "US"));
+    assert_eq!(
+        client.get_jurisdiction(&alice),
+        Some(String::from_str(&env, "US"))
+    );
+}
+
+#[test]
+fn test_propose_issuer_emits_event() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let new_issuer = Address::generate(&env);
+
+    client.propose_issuer(&issuer, &new_issuer);
+
+    let events = env.events().all();
+    // There should be at least one event (IssuerProposed).
+    assert!(!events.is_empty());
+}
+
+#[test]
+fn test_accept_issuer_emits_event() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let new_issuer = Address::generate(&env);
+
+    client.propose_issuer(&issuer, &new_issuer);
+    let events_before = env.events().all().len();
+
+    client.accept_issuer(&new_issuer);
+
+    let events_after = env.events().all().len();
+    assert!(events_after > events_before, "accept_issuer must emit an event");
+}
+
+#[test]
+fn test_accept_issuer_with_no_pending_proposal_errors() {
+    let env = Env::default();
+    let (_issuer, _contract_id, client) = setup(&env);
+    let random = Address::generate(&env);
+
+    let result = client.try_accept_issuer(&random);
+    assert_eq!(result, Err(Ok(Error::NoPendingIssuer)));
+}
+
+#[test]
+fn test_accept_issuer_wrong_address_errors() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let proposed = Address::generate(&env);
+    let wrong = Address::generate(&env);
+
+    client.propose_issuer(&issuer, &proposed);
+
+    let result = client.try_accept_issuer(&wrong);
+    assert_eq!(result, Err(Ok(Error::PendingIssuerMismatch)));
+
+    // Original issuer still in control.
+    let alice = Address::generate(&env);
+    client.set_jurisdiction(&issuer, &alice, &String::from_str(&env, "US"));
+    assert_eq!(
+        client.get_jurisdiction(&alice),
+        Some(String::from_str(&env, "US"))
+    );
+}
+
+#[test]
+fn test_cancel_issuer_proposal_prevents_accept() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let new_issuer = Address::generate(&env);
+
+    client.propose_issuer(&issuer, &new_issuer);
+    client.cancel_issuer_proposal(&issuer);
+
+    // The proposal was cancelled; accept must now fail.
+    let result = client.try_accept_issuer(&new_issuer);
+    assert_eq!(result, Err(Ok(Error::NoPendingIssuer)));
+
+    // Original issuer is still in control.
+    let alice = Address::generate(&env);
+    client.set_jurisdiction(&issuer, &alice, &String::from_str(&env, "US"));
+    assert_eq!(
+        client.get_jurisdiction(&alice),
+        Some(String::from_str(&env, "US"))
+    );
+}
+
+#[test]
+fn test_cancel_issuer_proposal_emits_event() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let new_issuer = Address::generate(&env);
+
+    client.propose_issuer(&issuer, &new_issuer);
+    let before = env.events().all().len();
+
+    client.cancel_issuer_proposal(&issuer);
+
+    assert!(
+        env.events().all().len() > before,
+        "cancel_issuer_proposal must emit an event"
+    );
+}
+
+#[test]
+fn test_propose_issuer_requires_current_issuer_auth() {
+    let env = Env::default();
+    let (_issuer, _contract_id, client) = setup(&env);
+    let impostor = Address::generate(&env);
+    let new_issuer = Address::generate(&env);
+
+    let result = client.try_propose_issuer(&impostor, &new_issuer);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}
+
+#[test]
+fn test_transfer_issuer_emergency_rotation_clears_pending_proposal() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let pending = Address::generate(&env);
+    let emergency_new = Address::generate(&env);
+
+    // Set up a pending proposal, then immediately do an emergency rotation.
+    client.propose_issuer(&issuer, &pending);
+    client.transfer_issuer(&issuer, &emergency_new);
+
+    // The pending address must no longer be able to accept.
+    let result = client.try_accept_issuer(&pending);
+    assert_eq!(result, Err(Ok(Error::NoPendingIssuer)));
+
+    // emergency_new is now issuer.
+    let alice = Address::generate(&env);
+    client.set_jurisdiction(&emergency_new, &alice, &String::from_str(&env, "US"));
+    assert_eq!(
+        client.get_jurisdiction(&alice),
+        Some(String::from_str(&env, "US"))
+    );
+}
+
+#[test]
+fn test_propose_issuer_overwrites_previous_proposal() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+
+    client.propose_issuer(&issuer, &first);
+    // Overwrite with a new proposal.
+    client.propose_issuer(&issuer, &second);
+
+    // First proposed address can no longer accept.
+    let result = client.try_accept_issuer(&first);
+    assert_eq!(result, Err(Ok(Error::PendingIssuerMismatch)));
+
+    // Second proposed address can accept.
+    client.accept_issuer(&second);
+
+    let alice = Address::generate(&env);
+    client.set_jurisdiction(&second, &alice, &String::from_str(&env, "DE"));
+    assert_eq!(
+        client.get_jurisdiction(&alice),
+        Some(String::from_str(&env, "DE"))
+    );
+}
