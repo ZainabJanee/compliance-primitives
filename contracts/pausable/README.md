@@ -83,3 +83,45 @@ To cut a release: bump `version` in this crate's section of the workspace
 `Cargo.toml` (or a crate-local `version` override), then push a tag matching
 `pausable-v<version>` (e.g. `pausable-v0.1.0`) or run the
 **Publish pausable to crates.io** workflow manually from the Actions tab.
+
+## Scope of this decision: `compliance-pausable` only
+
+The publishing decision above is **explicitly scoped to `compliance-pausable`**.
+It does not automatically extend to any other shared crate that may be added
+to this workspace (e.g. a future `compliance-check` trait crate).
+
+### Framework for future shared crates
+
+Each new workspace-internal crate should answer the same question independently:
+*is this crate meant to be pulled in as an ordinary Rust library dependency by
+projects outside this workspace?*
+
+- **If yes** (the crate defines a shared trait, type, or helper that other
+  Soroban projects compose with): follow the same model as
+  `compliance-pausable` — set `publish = false` in `Cargo.toml` until the API
+  is stable enough to commit to a semver contract, add `description`, `license`,
+  `repository`, and `readme` metadata, create a dedicated publish workflow
+  (`.github/workflows/publish-<crate-name>.yml`), and gate releases on an
+  explicit tag rather than every merge to `main`.
+
+- **If no** (the crate is a Soroban contract consumed as compiled wasm, or is
+  purely workspace-internal scaffolding): leave `publish = false` permanently.
+  Publishing a contract crate to crates.io would not serve its consumers, who
+  pull in the compiled `.wasm` artifact, not the Rust source.
+
+### `compliance-check` specifically
+
+If `compliance-check` is added as a shared trait/interface crate (analogous to
+`compliance-pausable`), the decision is: **it should follow the same
+opt-in-publish model as `compliance-pausable`**, with its own versioned tag and
+workflow, rather than being bundled into `compliance-pausable`'s release or
+published on an implicit schedule.  The rationale is identical — external
+Soroban projects may want to depend on the trait definition without pulling in
+the full primitives workspace, the API needs room to stabilise before
+committing to semver guarantees, and keeping the publish step explicit makes
+the decision reversible if the audience turns out to be workspace-only.
+
+If `compliance-check` is not intended for external consumption (e.g. it only
+exists to reduce duplication within this repo), keep `publish = false` and
+document that decision in its own `README.md` to prevent this question from
+being re-litigated.

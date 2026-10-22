@@ -33,13 +33,13 @@ fn setup_engine(env: &Env) -> EngineSetup {
 
     let engine_id = env.register(PolicyEngine, ());
     let engine = PolicyEngineClient::new(env, &engine_id);
-    engine.initialize(&engine_admin, &CombineOp::All);
+    engine.initialize(&engine_admin, &CombineOp::All, &None);
 
     let usa_code = String::from_str(env, "US");
-    engine.add_check(&engine_admin, &CheckKind::Denylist { contract: denylist_gate_id });
+    engine.add_check(&engine_admin, &CheckKind::Denylist(policy_engine::DenylistCheck { contract: denylist_gate_id }));
     engine.add_check(
         &engine_admin,
-        &CheckKind::Jurisdiction { contract: jurisdiction_flag_id, allowed_codes: vec![env, usa_code] },
+        &CheckKind::Jurisdiction(policy_engine::JurisdictionCheck { contract: jurisdiction_flag_id, allowed_codes: vec![env, usa_code] }),
     );
 
     EngineSetup { denylist_admin, issuer, denylist_gate, jurisdiction_flag, engine }

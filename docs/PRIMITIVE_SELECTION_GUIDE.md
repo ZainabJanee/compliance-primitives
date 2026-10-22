@@ -275,6 +275,77 @@ A: No. You can always add more primitives later, or migrate to policy-engine if 
 
 ---
 
+## Multisig Governance: Standalone vs. Built-in
+
+This workspace provides two independent M-of-N multisig implementations. Nothing
+in the code explains when to use one over the other, so this section does.
+
+### The two implementations
+
+**`multisig-admin` (standalone contract)**
+
+`multisig-admin` is a separate deployable contract that implements Soroban's
+`CustomAccountInterface`. When it is set as the `admin` address of any compliance
+primitive (`allowlist-token`, `denylist-gate`, `jurisdiction-flag`, etc.), the host
+automatically calls `MultisigAdmin::__check_auth` whenever the primitive calls
+`admin.require_auth()`. The primitive itself requires no modification.
+
+It also provides a `propose`/`approve`/`execute` workflow for staged,
+multi-step governance actions.
+
+**`denylist-gate` built-in multisig (issue #26 mode)**
+
+`denylist-gate` has its own `initialize_multisig`/`add_signer`/`remove_signer`
+entrypoints baked directly into the contract. Admin calls (`add_to_denylist`,
+`remove_from_denylist`) verify M-of-N inline, without a cross-contract call.
+
+### Tradeoff table
+
+| Aspect | `multisig-admin` (standalone) | Built-in multisig (e.g. denylist-gate) |
+|---|---|---|
+| Primitive changes needed | **None** — works with any contract that uses `require_auth()` | Each primitive must be modified to add the logic |
+| Reusability | **One deployment governs all primitives** | Per-primitive; each contract manages its own signer set independently |
+| Extra deployment | Yes — one extra contract address to deploy and fund | None |
+| Upgrade path | Swap the `admin` address on each governed primitive | Redeploy the primitive with updated built-in logic |
+| Auth overhead | One cross-contract call per admin operation | Inline — no cross-contract hop |
+| Proposal workflow | Yes — `propose`/`approve`/`execute` with expiry | Not available in the built-in mode |
+| Audit trail | On-chain events from the standalone contract | Events only at the primitive level |
+
+### When to use `multisig-admin` (standalone)
+
+- You want **a single multisig policy** to govern multiple primitives
+  (e.g. the same 3-of-5 set controls `allowlist-token`, `denylist-gate`,
+  and `jurisdiction-flag` simultaneously).
+- You don't control the primitive's source code, or you prefer not to fork
+  and maintain a modified version.
+- You want the `propose`/`approve`/`execute` staged workflow so governance
+  actions can be reviewed before they take effect.
+- You need a clean, reusable audit trail at the governance layer, separate
+  from the individual primitive's event stream.
+
+### When to use built-in multisig (e.g. `denylist-gate`'s own mode)
+
+- You are governing **only one primitive** and the extra deployment overhead
+  is not worth the added flexibility.
+- You want the tightest possible integration — no cross-contract call, lower
+  compute cost per admin transaction.
+- You control the primitive's source and are comfortable modifying and
+  redeploying it when the signer set or threshold changes.
+- You do not need a staged proposal workflow.
+
+### Are these meant to converge?
+
+No. They serve different points on the flexibility/simplicity spectrum and can
+coexist: for example, you could govern `allowlist-token` and `jurisdiction-flag`
+through a single `multisig-admin` instance while letting `denylist-gate` manage
+its own built-in signer set separately.
+
+The two implementations will not be merged into one; the standalone approach is
+architecturally cleaner for multi-primitive governance, while the built-in approach
+remains the right choice for single-primitive deployments that prioritize simplicity.
+
+---
+
 ## Next Steps
 
 1. Identify your regulatory requirements (KYC? Sanctions? Jurisdictions?)

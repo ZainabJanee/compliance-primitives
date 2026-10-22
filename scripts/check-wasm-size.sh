@@ -64,6 +64,7 @@ get_field() {
 }
 
 fail=0
+failures=()
 printf "%-24s %10s %10s %10s  %s\n" "contract" "size" "budget" "limit" "status"
 printf "%-24s %10s %10s %10s  %s\n" "--------" "----" "------" "-----" "------"
 
@@ -82,7 +83,11 @@ for crate in "${BUDGETED_CRATES[@]}"; do
   limit="$(awk -v b="$max_bytes" -v t="$TOLERANCE" 'BEGIN { printf "%d", b * t }')"
 
   if [ "$size" -gt "$limit" ]; then
-    status="FAIL (>10% over budget)"
+    over_limit=$((size - limit))
+    over_budget=$((size - max_bytes))
+    pct="$(awk -v s="$size" -v b="$max_bytes" 'BEGIN { printf "%.1f", (s - b) * 100 / b }')"
+    status="FAIL (+${over_limit} B over limit)"
+    failures+=("$crate: ${wasm_path} is ${size} bytes, ${over_limit} bytes over its ${limit}-byte limit (${over_budget} bytes / ${pct}% over its ${max_bytes}-byte baseline)")
     fail=1
   else
     status="ok"
@@ -93,6 +98,16 @@ done
 echo ""
 if [ "$fail" -ne 0 ]; then
   echo "==> wasm size budget check FAILED"
+  for msg in "${failures[@]}"; do
+    echo "error: $msg" >&2
+    # Surface each failure as an annotation on the PR when run in Actions.
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+      echo "::error title=wasm size budget::$msg"
+    fi
+  done
+  echo "" >&2
+  echo "If the growth is intentional, re-measure and update max_bytes in $BUDGETS_FILE" >&2
+  echo "and explain the increase in the PR description." >&2
   exit 1
 fi
 echo "==> wasm size budget check passed"

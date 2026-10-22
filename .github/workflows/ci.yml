@@ -32,6 +32,23 @@ jobs:
       - name: Run doc tests
         run: cargo test --workspace --doc --verbose
 
+  feature-flags:
+    name: cargo check (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features:
+          - --no-default-features
+          - --all-features
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Check workspace with ${{ matrix.features }}
+        run: cargo check --workspace ${{ matrix.features }}
+
   clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
@@ -67,8 +84,22 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
-      - name: Cache cargo
+      # Explicitly cache the wasm32v1-none target directory in addition to the
+      # native target/ tree.  Swatinem/rust-cache@v2 keys on the host triple by
+      # default; the cross-compiled wasm target lives in a separate subdirectory
+      # (target/wasm32v1-none/) and may not be included in the default cache
+      # entry depending on the runner's Rust sysroot layout.  Setting
+      # `cache-targets: "true"` and adding a shared-key suffix scoped to the
+      # wasm target ensures the release build artifacts are preserved between
+      # runs and avoids a full rebuild on every push.
+      - name: Cache cargo (wasm target)
         uses: Swatinem/rust-cache@v2
+        with:
+          # Scope this cache entry to the wasm target so it doesn't collide
+          # with the native-target entries used by the test/clippy jobs.
+          shared-key: wasm32v1-none
+          # Cache the wasm release artifacts explicitly.
+          cache-targets: "true"
       - name: Build contracts to wasm
         run: cargo build --workspace --target wasm32v1-none --release
 
@@ -81,8 +112,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
-      - name: Cache cargo
+      # Use the same shared-key as the wasm-build job so this job can reuse
+      # the cached wasm32v1-none release artifacts rather than rebuilding them.
+      - name: Cache cargo (wasm target)
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm32v1-none
+          cache-targets: "true"
       - name: Check wasm binary sizes against budget
         run: bash scripts/check-wasm-size.sh
 
@@ -128,10 +164,13 @@ jobs:
         run: ./scripts/regenerate-docs.sh
       - name: Check for differences
         run: |
-          if git diff --exit-code docs/interfaces/ > /dev/null; then
+          # `git status --porcelain` also catches untracked files (e.g. a new
+          # contract whose interface was generated but never committed).
+          if [ -z "$(git status --porcelain docs/interfaces/)" ]; then
             echo "✓ docs/interfaces is up to date"
           else
             echo "✗ docs/interfaces is out of date. Run ./scripts/regenerate-docs.sh and commit the changes."
+            git status --porcelain docs/interfaces/
             git diff docs/interfaces/
             exit 1
           fi
@@ -175,6 +214,21 @@ jobs:
 
           echo "All example crates passed tests."
 
+  dead-code-allows:
+    name: dead_code allow lint
+    runs-on: ubuntu-latest
+    # Fail if any #[allow(dead_code)] added in this PR is missing a linked
+    # issue reference (#NNN) in the same line or the line immediately above.
+    # This prevents untracked dead code from silently accumulating.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch base branch for diff
+        run: git fetch origin main
+      - name: Check new #[allow(dead_code)] for linked issue references
+        run: bash scripts/check-dead-code-allows.sh
+
   changelog-version-sync:
     name: changelog version sync check
     runs-on: ubuntu-latest
@@ -184,6 +238,18 @@ jobs:
           fetch-depth: 2
       - name: Check CHANGELOG.md and version are in sync
         run: ./scripts/check-changelog.sh
+
+  contract-line-count:
+    name: contract line-count guideline check
+    runs-on: ubuntu-latest
+    # Warning only — a contract growing past ~300 lines gets a visible nudge
+    # without blocking the PR.  Set HARD_FAIL=1 (or remove continue-on-error)
+    # once the guideline is enforced more strictly.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Flag contracts over the ~300-line guideline
+        run: bash scripts/check-contract-line-count.sh
 
   semver-checks:
     name: cargo semver-checks

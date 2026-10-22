@@ -133,3 +133,64 @@ fn fuzz_jurisdiction_set_get_sequences() {
         }
     }
 }
+
+#[test]
+fn fuzz_jurisdiction_multicode_add_remove_sequences() {
+    let iterations: u32 = std::env::var("FUZZ_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    let ops_per_iter: u32 = std::env::var("FUZZ_OPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+    let code_strs = ["US", "CA", "GB", "DE", "JP", "FR", "AU"];
+
+    for seed in 1..=iterations {
+        let env = Env::default();
+        env.mock_all_auths();
+        let issuer = Address::generate(&env);
+        let contract_id = env.register(JurisdictionFlag, ());
+        let client = JurisdictionFlagClient::new(&env, &contract_id);
+        client.initialize(&issuer);
+        let address = Address::generate(&env);
+        let codes: [String; 7] = [
+            String::from_str(&env, code_strs[0]),
+            String::from_str(&env, code_strs[1]),
+            String::from_str(&env, code_strs[2]),
+            String::from_str(&env, code_strs[3]),
+            String::from_str(&env, code_strs[4]),
+            String::from_str(&env, code_strs[5]),
+            String::from_str(&env, code_strs[6]),
+        ];
+        let mut model = [false; 7];
+        let mut rng = seed;
+
+        for op in 0..ops_per_iter {
+            let code_i = next_usize(&mut rng, codes.len());
+            if next_u32(&mut rng) & 1 == 0 {
+                client.add_jurisdiction(&issuer, &address, &codes[code_i]);
+                model[code_i] = true;
+            } else {
+                client.remove_jurisdiction(&issuer, &address, &codes[code_i]);
+                model[code_i] = false;
+            }
+
+            let listed = client.list_jurisdictions(&address);
+            let expected_count = model.iter().filter(|present| **present).count();
+            assert_eq!(
+                listed.len() as usize,
+                expected_count,
+                "seed={seed} op={op}: jurisdiction list size mismatch"
+            );
+            for (code_i, expected) in model.iter().enumerate() {
+                assert_eq!(
+                    listed.iter().any(|listed_code| listed_code == codes[code_i]),
+                    *expected,
+                    "seed={seed} op={op} code={}: jurisdiction membership mismatch",
+                    code_strs[code_i]
+                );
+            }
+        }
+    }
+}

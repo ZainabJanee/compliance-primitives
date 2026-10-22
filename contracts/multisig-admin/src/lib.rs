@@ -43,63 +43,185 @@
 //! through the multisig: they call `env.current_contract_address().require_auth()`
 //! which re-enters `__check_auth`, ensuring no single signer can unilaterally
 //! change the policy.
+//!
+//! ## Who calls this contract
+//!
+//! There are three distinct kinds of caller, and each touches a different
+//! part of the surface:
+//!
+//! - **The deployer / issuer operations team** calls [`MultisigAdmin::initialize`]
+//!   exactly once with the initial signer set and threshold. After that the
+//!   deployer has no special privileges — every later change goes through
+//!   the multisig itself.
+//! - **The Soroban host** calls `__check_auth` on behalf of any contract
+//!   that runs `admin.require_auth()` where `admin` is this contract's
+//!   address. Signers never call `__check_auth` directly; they sign the
+//!   authorization entry for the outer operation (e.g. `denylist-gate.add_to_denylist`)
+//!   and the submitter attaches the list of approving signer addresses as the
+//!   `signatures` value.
+//! - **Individual signers** call `propose`, `approve`, and `execute` to
+//!   coordinate an off-chain-visible approval trail before submitting the
+//!   final transaction, and collectively (via `__check_auth`) call
+//!   `add_signer`, `remove_signer`, `update_threshold`, `pause`, and
+//!   `unpause` to govern this contract's own configuration.
+//!
+//! Read-only accessors (`get_signers`, `get_threshold`, `get_proposal`,
+//! `is_paused`) may be called by anyone, including off-chain tooling such as
+//! `tools/indexer` and other contracts deciding whether to trust this
+//! contract as an admin.
+//!
+//! ## Composition with the other contracts in this repo
+//!
+//! This contract never calls the other contracts itself — composition is
+//! entirely by *address*: you pass this contract's ID wherever another
+//! contract asks for an admin/issuer `Address`, and Soroban's auth framework
+//! routes the `require_auth()` back here.
+//!
+//! | Contract | Role this contract plays | Operations it gates |
+//! |---|---|---|
+//! | `allowlist-token` | `admin` | allowlist add/remove, timelocked upgrade |
+//! | `denylist-gate` | `admin` | denylist add/remove, timelocked upgrade |
+//! | `jurisdiction-flag` | `issuer` | setting/clearing jurisdiction flags, upgrade |
+//! | `policy-engine` | `admin` | registering/removing checks, combine op |
+//! | `compliance-aggregator` | `admin` | wiring gate/flag/breaker addresses, pause |
+//! | `circuit-breaker` | `admin` | `freeze` / `unfreeze` (emergency stop) |
+//! | `audit-log` | `admin` | audit-log administration |
+//! | `pausable` (shared crate) | — | used *internally* here to back `pause`/`unpause` |
+//!
+//! Typical deployment: deploy `multisig-admin` first, initialize it with the
+//! operations team's signer keys, then initialize each primitive with the
+//! multisig's contract ID as its admin. One multisig can govern every
+//! primitive in a deployment, giving a single auditable M-of-N policy. A
+//! common pattern is to pair it with `audit-log` (record proposal creation,
+//! approvals, and execution — see the `multisig-audit-trail` example) and to
+//! make it the admin of `circuit-breaker` so that an emergency freeze still
+//! requires quorum.
+//!
+//! ## Storage and TTL policy
+//!
+//! All state (signer set, threshold, pending proposals, next proposal ID,
+//! pause flag) lives in **instance storage**, which shares a single TTL with
+//! the contract instance entry. Every write path calls
+//! `extend_instance_ttl`, which extends that TTL to
+//! [`INSTANCE_TTL_EXTEND_TO`] ledgers (~30 days at ~5s/ledger) whenever the
+//! remaining TTL has fallen below [`INSTANCE_TTL_THRESHOLD`] ledgers
+//! (~1 day). A multisig that is written to at least once a month therefore
+//! never becomes archived; one that sits idle longer must be restored (e.g.
+//! `stellar contract restore`) before its admin powers can be exercised,
+//! otherwise every governed primitive's `require_auth()` would fail.
+//!
+//! ## Upgradeability
+//!
+//! `upgrade(new_wasm_hash)` moves the contract's code to a new WASM hash via
+//! `env.deployer().update_current_contract_wasm`, following the same
+//! admin-gated pattern as `jurisdiction-flag::upgrade` and the
+//! `policy-engine::propose_upgrade` / `commit_upgrade` / `cancel_upgrade` flow.
+//! Because this contract *is* the admin, the gate is
+//! `env.current_contract_address().require_auth()` — the upgrade must be
+//! approved by the current M-of-N signer threshold through `__check_auth`,
+//! exactly like `add_signer` / `update_threshold`.
+//!
+//! The WASM swap does not touch storage: the signer set, threshold, pending
+//! proposals and the next proposal ID are all preserved, and the contract
+//! address is unchanged, so every primitive that uses this contract as its
+//! admin keeps working without reconfiguration. An `Upgraded` event carrying
+//! the new WASM hash is emitted for auditability. If a future version changes
+//! the storage layout it must ship a migration entrypoint, per
+//! `STORAGE_VERSIONING.md`.
 #![no_std]
 
 use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
     contract, contracterror, contractevent, contractimpl, contracttype,
     crypto::Hash,
-    Address, Env, Vec,
+    Address, BytesN, Env, Vec,
 };
 
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
 
-mod events {
-    use soroban_sdk::{symbol_short, Address, Env};
+/// Emitted when a new signer is added to the set.
+///
+/// topics : [Symbol("SignerAdded"), Address(signer)]
+/// data   : {}
+#[contractevent]
+pub struct SignerAdded {
+    #[topic]
+    pub signer: Address,
+}
 
-    /// Emitted when a new signer is added to the set.
-    ///
-    /// topics : [Symbol("SignerAdded"), Address(signer)]
-    /// data   : Void
-    pub fn signer_added(env: &Env, signer: &Address) {
-        env.events()
-            .publish((symbol_short!("SignerAdd"), signer.clone()), ());
-    }
+/// Emitted when a signer is removed from the set.
+///
+/// topics : [Symbol("SignerRemoved"), Address(signer)]
+/// data   : {}
+#[contractevent]
+pub struct SignerRemoved {
+    #[topic]
+    pub signer: Address,
+}
 
-    /// Emitted when a signer is removed from the set.
-    ///
-    /// topics : [Symbol("SignerRemoved"), Address(signer)]
-    /// data   : Void
-    pub fn signer_removed(env: &Env, signer: &Address) {
-        env.events()
-            .publish((symbol_short!("SignerRm"), signer.clone()), ());
-    }
+/// Emitted when the signing threshold is updated.
+///
+/// topics : [Symbol("ThresholdSet")]
+/// data   : { threshold: u32 }
+#[contractevent]
+pub struct ThresholdSet {
+    pub threshold: u32,
+}
 
-    /// Emitted when the signing threshold is updated.
-    ///
-    /// topics : [Symbol("ThresholdSet")]
-    /// data   : u32 (new threshold)
-    pub fn threshold_updated(env: &Env, threshold: u32) {
-        env.events()
-            .publish((symbol_short!("ThreshSet"),), threshold);
-    }
+/// Emitted on every successful `__check_auth` call.
+///
+/// topics : [Symbol("AuthOk")]
+/// data   : { valid_count: u32, threshold: u32 }
+#[contractevent]
+pub struct AuthOk {
+    pub valid_count: u32,
+    pub threshold: u32,
+}
 
-    /// Emitted on every successful `__check_auth` call.
-    ///
-    /// topics : [Symbol("AuthOk")]
-    /// data   : (u32 valid_count, u32 threshold)  — encoded as a two-element
-    ///          Vec so both values travel in a single ScVal.
-    pub fn auth_approved(env: &Env, valid_count: u32, threshold: u32) {
-        env.events()
-            .publish((symbol_short!("AuthOk"),), (valid_count, threshold));
-    }
+/// Emitted when the contract is paused.
+///
+/// topics : [Symbol("Paused")]
+/// data   : {}
+#[contractevent]
+pub struct ContractPausedEvent {}
+
+/// Emitted when the contract is unpaused.
+///
+/// topics : [Symbol("Unpaused")]
+/// data   : {}
+#[contractevent]
+pub struct ContractUnpausedEvent {}
+
+/// Emitted when the contract WASM is upgraded.
+///
+/// topics : [Symbol("Upgraded")]
+/// data   : { new_wasm_hash: BytesN<32> }
+#[contractevent]
+pub struct Upgraded {
+    pub new_wasm_hash: BytesN<32>,
 }
 
 // ---------------------------------------------------------------------------
 // Storage
 // ---------------------------------------------------------------------------
+
+/// Extend the instance TTL when it drops below this many ledgers
+/// (~1 day at ~5s/ledger).
+pub const INSTANCE_TTL_THRESHOLD: u32 = 17_280;
+
+/// Target remaining instance TTL after extension (~30 days at ~5s/ledger).
+pub const INSTANCE_TTL_EXTEND_TO: u32 = 518_400;
+
+/// Refresh the TTL of the contract instance (and therefore of every
+/// instance-storage entry: signers, threshold, proposals, pause flag).
+/// Called on every write path so live state survives Soroban archival.
+fn extend_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -148,6 +270,21 @@ pub enum Error {
     /// The same signer address appears more than once in the provided
     /// signature set for a single `__check_auth` call.
     DuplicateSignature = 7,
+    /// The contract is paused; no mutating operations are allowed.
+    ContractPaused = 8,
+    /// The referenced proposal does not exist.
+    ProposalNotFound = 9,
+    /// The proposal has passed its expiry ledger sequence.
+    ExpiredProposal = 10,
+    /// A duplicate signer address was found in the `signers` list passed to
+    /// `initialize`. Duplicates are rejected because `__check_auth` counts
+    /// distinct signer addresses, so a duplicated entry can make the
+    /// threshold impossible to reach.
+    DuplicateSigner = 11,
+    /// The caller is not in the current signer set.
+    NotASigner = 12,
+    /// The signer has already approved this proposal.
+    AlreadyApproved = 13,
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +311,21 @@ impl MultisigAdmin {
         if env.storage().instance().has(&DataKey::Threshold) {
             return Err(Error::AlreadyInitialized);
         }
+
+        // Reject duplicate signer addresses. `__check_auth` counts distinct
+        // signer addresses, so a duplicate entry means the effective signer
+        // count is smaller than `signers.len()` and a threshold validated
+        // against the raw count can be impossible to reach — permanently
+        // locking the contract and everything it governs.
+        for i in 0..signers.len() {
+            let addr_i = signers.get(i).unwrap();
+            for j in (i + 1)..signers.len() {
+                if signers.get(j).unwrap() == addr_i {
+                    return Err(Error::DuplicateSigner);
+                }
+            }
+        }
+
         if threshold == 0 || threshold as usize > signers.len() as usize {
             return Err(Error::InvalidThreshold);
         }
@@ -181,6 +333,7 @@ impl MultisigAdmin {
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &threshold);
+        extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -188,7 +341,8 @@ impl MultisigAdmin {
     pub fn pause(env: Env) -> Result<(), Error> {
         env.current_contract_address().require_auth();
         compliance_pausable::pause(&env);
-        env.events().publish((), soroban_sdk::symbol_short!("Paused"));
+        extend_instance_ttl(&env);
+        ContractPausedEvent {}.publish(&env);
         Ok(())
     }
 
@@ -196,13 +350,31 @@ impl MultisigAdmin {
     pub fn unpause(env: Env) -> Result<(), Error> {
         env.current_contract_address().require_auth();
         compliance_pausable::unpause(&env);
-        env.events().publish((), soroban_sdk::symbol_short!("Unpaused"));
+        extend_instance_ttl(&env);
+        ContractUnpausedEvent {}.publish(&env);
         Ok(())
     }
 
     /// Check if the contract is currently paused.
     pub fn is_paused(env: Env) -> bool {
         compliance_pausable::is_paused(&env)
+    }
+
+    /// Upgrade the contract WASM to `new_wasm_hash`. Requires the current
+    /// M-of-N threshold (the call goes through `__check_auth`).
+    ///
+    /// All storage — signers, threshold and proposals — is preserved across
+    /// the upgrade and the contract address does not change. The new WASM
+    /// must already be uploaded to the network.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Threshold) {
+            return Err(Error::NotInitialized);
+        }
+        env.current_contract_address().require_auth();
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        Upgraded { new_wasm_hash }.publish(&env);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -231,7 +403,8 @@ impl MultisigAdmin {
 
         signers.push_back(new_signer.clone());
         env.storage().instance().set(&DataKey::Signers, &signers);
-        events::signer_added(&env, &new_signer);
+        extend_instance_ttl(&env);
+        SignerAdded { signer: new_signer }.publish(&env);
         Ok(())
     }
 
@@ -270,7 +443,8 @@ impl MultisigAdmin {
         }
 
         env.storage().instance().set(&DataKey::Signers, &signers);
-        events::signer_removed(&env, &signer);
+        extend_instance_ttl(&env);
+        SignerRemoved { signer }.publish(&env);
         Ok(())
     }
 
@@ -292,7 +466,8 @@ impl MultisigAdmin {
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &threshold);
-        events::threshold_updated(&env, threshold);
+        extend_instance_ttl(&env);
+        ThresholdSet { threshold }.publish(&env);
         Ok(())
     }
 
@@ -348,11 +523,10 @@ impl MultisigAdmin {
             .get(&DataKey::NextProposalId)
             .unwrap_or(0);
 
-        let signers: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Signers)
-            .ok_or(Error::NotInitialized)?;
+        // Guard: contract must be initialized before proposals can be created.
+        if !env.storage().instance().has(&DataKey::Signers) {
+            return Err(Error::NotInitialized);
+        }
 
         let proposal = Proposal {
             payload,
@@ -366,6 +540,7 @@ impl MultisigAdmin {
         env.storage()
             .instance()
             .set(&DataKey::NextProposalId, &(proposal_id + 1));
+        extend_instance_ttl(&env);
 
         Ok(proposal_id)
     }
@@ -375,6 +550,9 @@ impl MultisigAdmin {
     /// to execute.
     pub fn approve(env: Env, proposal_id: u64, approver: Address) -> Result<bool, Error> {
         compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
+        // The approver must prove they authorized this call — prevents any
+        // caller from submitting someone else's approval on their behalf.
+        approver.require_auth();
         let current_ledger = env.ledger().sequence();
 
         let mut proposal: Proposal = env
@@ -402,13 +580,13 @@ impl MultisigAdmin {
             }
         }
         if !is_valid_signer {
-            return Err(Error::ThresholdNotMet);
+            return Err(Error::NotASigner);
         }
 
         // Check if already approved.
         for i in 0..proposal.approvals.len() {
             if proposal.approvals.get(i).unwrap() == approver {
-                return Ok(false);
+                return Err(Error::AlreadyApproved);
             }
         }
 
@@ -416,6 +594,7 @@ impl MultisigAdmin {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        extend_instance_ttl(&env);
 
         let threshold: u32 = env
             .storage()
@@ -447,13 +626,39 @@ impl MultisigAdmin {
             .get(&DataKey::Threshold)
             .ok_or(Error::NotInitialized)?;
 
-        if (proposal.approvals.len() as u32) < threshold {
+        // Count only approvals from addresses still in the current signer set.
+        // If a signer was removed after approving (e.g. compromised key), their
+        // earlier approval must not count toward the threshold.
+        let signers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Signers)
+            .ok_or(Error::NotInitialized)?;
+
+        let mut valid_approval_count: u32 = 0;
+        for i in 0..proposal.approvals.len() {
+            let approver = proposal.approvals.get(i).unwrap();
+            for j in 0..signers.len() {
+                if signers.get(j).unwrap() == approver {
+                    valid_approval_count += 1;
+                    break;
+                }
+            }
+        }
+
+        if valid_approval_count < threshold {
             return Err(Error::ThresholdNotMet);
         }
 
         env.storage()
             .instance()
             .remove(&DataKey::Proposal(proposal_id));
+        extend_instance_ttl(&env);
+
+        // Emit an on-chain event so off-chain indexers can track which
+        // proposals have been executed and when.
+        env.events()
+            .publish((soroban_sdk::symbol_short!("PropExec"),), proposal_id);
 
         Ok(())
     }
@@ -540,7 +745,7 @@ impl CustomAccountInterface for MultisigAdmin {
         }
 
         if valid_count >= threshold {
-            events::auth_approved(&env, valid_count, threshold);
+            AuthOk { valid_count, threshold }.publish(&env);
             Ok(())
         } else {
             Err(Error::ThresholdNotMet)

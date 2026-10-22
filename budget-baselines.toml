@@ -2,7 +2,23 @@
 cpu = 1
 memory = 1
 
+[allowlist-token.add_to_allowlist]
+cpu = 1
+memory = 1
+
+[allowlist-token.add_to_allowlist_delegated]
+cpu = 1
+memory = 1
+
 [denylist-gate.check]
+cpu = 1
+memory = 1
+
+[denylist-gate.add_to_denylist_without_audit_log]
+cpu = 1
+memory = 1
+
+[denylist-gate.add_to_denylist_with_audit_log]
 cpu = 1
 memory = 1
 
@@ -11,5 +27,37 @@ cpu = 1
 memory = 1
 
 [policy-engine.evaluate]
+cpu = 1
+memory = 1
+
+# check_address with both denylist-gate and jurisdiction-flag registered
+# (two downstream cross-contract calls). Measured by
+# `cargo test -p compliance-aggregator budget_regression -- --nocapture`.
+[compliance-aggregator.check_address]
+cpu = 1500000
+memory = 400000
+
+# multisig-admin's hottest entrypoint: `__check_auth` runs on every admin
+# operation of every primitive that uses the multisig as its admin.
+# Measured with a 2-of-3 signer set and two approving signatures
+# (`test_budget_regression_multisig_check_auth`). CI fails if either value
+# regresses by more than 10%.
+[multisig-admin.__check_auth]
+cpu = 250000
+memory = 40000
+
+# audit-log's hottest entrypoint: `record` appends one persistent entry per
+# compliance event. Measured against an empty log with one record call
+# (`test_budget_regression_audit_log_record`). CI fails if either value
+# regresses by more than 10%.
+[audit-log.record]
+cpu = 1
+memory = 1
+
+# circuit-breaker's hottest entrypoint: `is_frozen`, read on every check by
+# consumers such as `compliance-aggregator`. Measured by
+# `test_budget_regression_is_frozen`. CI fails if either value regresses by
+# more than 10%.
+[circuit-breaker.is_frozen]
 cpu = 1
 memory = 1

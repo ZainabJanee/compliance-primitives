@@ -50,6 +50,7 @@ Each example under `/examples` demonstrates a different composition pattern:
 - **[denylist-gate-sep41](./examples/denylist-gate-sep41)** — `denylist-gate` integration for SEP-41 anchor compliance
 - **[jurisdiction-flag-consumer](./examples/jurisdiction-flag-consumer)** — token enforcing jurisdiction-based transfer restrictions
 - **[jurisdiction-denylist-consumer](./examples/jurisdiction-denylist-consumer)** — combines `jurisdiction-flag` and `denylist-gate` checks
+- **[multisig-governed-allowlist](./examples/multisig-governed-allowlist)** — `multisig-admin` as the admin of `allowlist-token`, so every allowlist change requires M-of-N signer approval
 - **[rwa-compliance-flow](./examples/rwa-compliance-flow)** — full RWA compliance stack with allowlist, denylist, and jurisdiction checks
 - **[rwa-token](./examples/rwa-token)** — reference RWA token composing all three primitives (testnet deployment available)
 

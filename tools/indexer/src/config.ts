@@ -13,9 +13,13 @@ export interface Config {
   policyEngineContractId: string;
   /** Contract ID of the deployed circuit-breaker contract (or empty to skip) */
   circuitBreakerContractId: string;
+  /** Contract ID of the deployed audit-log contract (or empty to skip) */
+  auditLogContractId: string;
   dbPath: string;
   pollIntervalMs: number;
   startLedger: number;
+  /** Stop after indexing this ledger; 0 keeps polling indefinitely. */
+  endLedger: number;
 }
 
 const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
@@ -28,6 +32,7 @@ const CONTRACT_ID_ENV_VARS = [
   "AGGREGATOR_CONTRACT_ID",
   "POLICY_ENGINE_CONTRACT_ID",
   "CIRCUIT_BREAKER_CONTRACT_ID",
+  "AUDIT_LOG_CONTRACT_ID",
 ] as const;
 
 function required(name: string, env: NodeJS.ProcessEnv): string {
@@ -64,6 +69,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (configuredContracts.length === 0) throw new Error("Invalid indexer configuration: at least one contract ID is required");
   for (const name of configuredContracts) contractId(name, env);
 
+  const startLedger = positiveInteger("START_LEDGER", env.START_LEDGER, 0, true);
+  const endLedger = positiveInteger("END_LEDGER", env.END_LEDGER, 0, true);
+  if (startLedger > 0 && endLedger > 0 && endLedger < startLedger) {
+    throw new Error("Invalid indexer configuration: END_LEDGER must be >= START_LEDGER");
+  }
+
   return {
     rpcUrl,
     networkPassphrase: env.NETWORK_PASSPHRASE?.trim() || "Test SDF Network ; September 2015",
@@ -74,8 +85,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     aggregatorContractId: env.AGGREGATOR_CONTRACT_ID?.trim() || "",
     policyEngineContractId: env.POLICY_ENGINE_CONTRACT_ID?.trim() || "",
     circuitBreakerContractId: env.CIRCUIT_BREAKER_CONTRACT_ID?.trim() || "",
+    auditLogContractId: env.AUDIT_LOG_CONTRACT_ID?.trim() || "",
     dbPath: required("DB_PATH", env),
     pollIntervalMs: positiveInteger("POLL_INTERVAL_MS", env.POLL_INTERVAL_MS, 5000),
-    startLedger: positiveInteger("START_LEDGER", env.START_LEDGER, 0, true),
+    startLedger,
+    endLedger,
   };
 }

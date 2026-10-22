@@ -1,0 +1,15 @@
+[package]
+name = "allowlist-token-usage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Example: driving allowlist-token end-to-end through its generated client."
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }

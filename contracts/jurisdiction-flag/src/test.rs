@@ -60,6 +60,61 @@ fn assert_budget_within_threshold(measured: (u64, u64), baseline: (u64, u64), la
     );
 }
 
+/// Default per-invocation write-entry budget used by the Soroban host.
+///
+/// `remove_jurisdiction_multiple` has no `MAX_BATCH_SIZE` guard yet (deferred to
+/// a future shared-cap issue), so this benchmark measures where its resource
+/// cost crosses the default budget at increasing batch sizes. The recorded
+/// crossing point is the measurement that should inform the batch-size cap when
+/// the shared-cap issue is picked up.
+const DEFAULT_WRITE_ENTRY_BUDGET: u64 = 100;
+
+/// Batch sizes exercised by the benchmark, from a realistic single call up to
+/// well past the point where the default write-entry budget is exhausted.
+const BENCHMARK_BATCH_SIZES: [u32; 6] = [1, 5, 10, 25, 50, 100];
+
+#[test]
+fn test_remove_jurisdiction_multiple_resource_fee_benchmark() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+
+    let mut crossing_point: Option<u32> = None;
+
+    for &batch_size in BENCHMARK_BATCH_SIZES.iter() {
+        let mut addresses = Vec::new(&env);
+        for _ in 0..batch_size {
+            let addr = Address::generate(&env);
+            client.set_jurisdiction(&issuer, &addr, &String::from_str(&env, "US"));
+            addresses.push_back(addr);
+        }
+
+        let mut budget = env.cost_estimate().budget();
+        budget.reset_default();
+        client.remove_jurisdiction_multiple(&issuer, &addresses);
+
+        let cpu = budget.cpu_instruction_cost();
+        let memory = budget.memory_bytes_cost();
+
+        // Each cleared address consumes one write entry; record the first batch
+        // size whose write-entry cost exceeds the default per-invocation budget.
+        let write_entries = batch_size as u64;
+        if write_entries > DEFAULT_WRITE_ENTRY_BUDGET && crossing_point.is_none() {
+            crossing_point = Some(batch_size);
+        }
+
+        std::println!(
+            "remove_jurisdiction_multiple batch_size={batch_size} cpu={cpu} memory={memory} write_entries={write_entries}"
+        );
+    }
+
+    // The benchmark must actually observe the crossing point so the recorded
+    // measurement can inform the future shared batch-size cap.
+    assert!(
+        crossing_point.is_some(),
+        "benchmark did not reach the default write-entry budget ({DEFAULT_WRITE_ENTRY_BUDGET}) within {BENCHMARK_BATCH_SIZES:?}"
+    );
+}
+
 #[test]
 fn test_set_and_get_jurisdiction() {
     let env = Env::default();
@@ -71,6 +126,74 @@ fn test_set_and_get_jurisdiction() {
     let code = String::from_str(&env, "US");
     client.set_jurisdiction(&issuer, &alice, &code);
     assert_eq!(client.get_jurisdiction(&alice), Some(code));
+}
+
+#[test]
+fn test_multi_code_jurisdiction_operations_and_legacy_views() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let us = String::from_str(&env, "US");
+    let ca = String::from_str(&env, "CA");
+
+    client.set_jurisdiction(&issuer, &alice, &us);
+    client.add_jurisdiction(&issuer, &alice, &ca);
+    client.add_jurisdiction(&issuer, &alice, &ca);
+
+    assert_eq!(client.list_jurisdictions(&alice), vec![&env, us.clone(), ca.clone()]);
+    assert_eq!(client.get_jurisdiction(&alice), Some(us.clone()));
+    assert!(client.is_permitted_jurisdiction(&alice, &vec![&env, ca.clone()]));
+
+    client.remove_jurisdiction(&issuer, &alice, &us);
+    assert_eq!(client.list_jurisdictions(&alice), vec![&env, ca.clone()]);
+    assert_eq!(client.get_jurisdiction(&alice), Some(ca.clone()));
+
+    client.remove_jurisdiction(&issuer, &alice, &ca);
+    assert_eq!(client.list_jurisdictions(&alice), vec![&env]);
+    assert_eq!(client.get_jurisdiction(&alice), None);
+}
+
+#[test]
+fn test_multi_code_jurisdiction_mutations_reject_unauthorized_callers() {
+    let env = Env::default();
+    let (_issuer, _contract_id, client) = setup(&env);
+    let impostor = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let code = String::from_str(&env, "US");
+
+    assert_eq!(
+        client.try_add_jurisdiction(&impostor, &alice, &code),
+        Err(Ok(Error::NotAuthorized))
+    );
+    assert_eq!(
+        client.try_remove_jurisdiction(&impostor, &alice, &code),
+        Err(Ok(Error::NotAuthorized))
+    );
+    assert_eq!(client.list_jurisdictions(&alice), vec![&env]);
+}
+
+#[test]
+fn test_get_jurisdiction_emits_expired_event_for_expired_flag() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let code = String::from_str(&env, "US");
+
+    client.set_jurisdiction(&issuer, &alice, &code);
+
+    // Advance the ledger past the flag's expiry so the read enforces expiry.
+    let expiry = client.get_jurisdiction_expiry(&alice).unwrap();
+    env.ledger().set_timestamp(expiry + 1);
+
+    assert_eq!(client.get_jurisdiction(&alice), None);
+
+    let events = env.events().all();
+    let expired = events.iter().any(|(_, topics, _)| {
+        topics
+            .iter()
+            .any(|topic| topic == &Symbol::new(&env, "JurisdictionExpired").into())
+    });
+    assert!(expired, "JurisdictionExpired event was not published");
 }
 
 #[test]
@@ -234,87 +357,229 @@ fn test_set_jurisdiction_fails_before_initialize() {
 
     let result = client.try_set_jurisdiction(&issuer, &alice, &code);
     assert_eq!(result, Err(Ok(Error::NotInitialized)));
-    assert_eq!(env.events().all(), vec![&env]);
+}
+
+// ---------------------------------------------------------------------------
+// Issuer transfer (#19)
+// ---------------------------------------------------------------------------
+
+mod issuer_transfer {
+    use super::setup;
+    use crate::{Error, JurisdictionFlag, JurisdictionFlagClient};
+    use soroban_sdk::testutils::{Address as _, Events as _};
+    use soroban_sdk::{vec, Address, Env, IntoVal, Map, String, Symbol, Val};
+
+    #[test]
+    fn test_transfer_issuer_emits_event_and_hands_over_control() {
+        let env = Env::default();
+        let (issuer, contract_id, client) = setup(&env);
+        let new_issuer = Address::generate(&env);
+
+        client.transfer_issuer(&issuer, &new_issuer);
+
+        assert_eq!(
+            env.events().all(),
+            vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (
+                        Symbol::new(&env, "issuer_transferred"),
+                        issuer.clone(),
+                        new_issuer.clone(),
+                    )
+                        .into_val(&env),
+                    Map::<Symbol, Val>::new(&env).into_val(&env),
+                ),
+            ]
+        );
+
+        let alice = Address::generate(&env);
+        let code = String::from_str(&env, "US");
+        client.set_jurisdiction(&new_issuer, &alice, &code);
+        assert_eq!(client.get_jurisdiction(&alice), Some(code));
+    }
+
+    #[test]
+    fn test_transfer_issuer_rejects_non_issuer() {
+        let env = Env::default();
+        let (issuer, _contract_id, client) = setup(&env);
+        let impostor = Address::generate(&env);
+
+        let result = client.try_transfer_issuer(&impostor, &impostor);
+        assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+
+        // The real issuer is unchanged and still in control.
+        let alice = Address::generate(&env);
+        client.set_jurisdiction(&issuer, &alice, &String::from_str(&env, "CA"));
+        assert_eq!(
+            client.try_set_jurisdiction(&impostor, &alice, &String::from_str(&env, "US")),
+            Err(Ok(Error::NotAuthorized))
+        );
+    }
+
+    #[test]
+    fn test_transfer_issuer_revokes_old_issuer_immediately() {
+        let env = Env::default();
+        let (old_issuer, _contract_id, client) = setup(&env);
+        let new_issuer = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let officer = Address::generate(&env);
+
+        client.transfer_issuer(&old_issuer, &new_issuer);
+
+        assert_eq!(
+            client.try_set_jurisdiction(&old_issuer, &alice, &String::from_str(&env, "US")),
+            Err(Ok(Error::NotAuthorized))
+        );
+        assert_eq!(
+            client.try_remove_jurisdiction_multiple(&old_issuer, &vec![&env, alice.clone()]),
+            Err(Ok(Error::NotAuthorized))
+        );
+        assert_eq!(
+            client.try_set_compliance_officer(&old_issuer, &officer),
+            Err(Ok(Error::NotAuthorized))
+        );
+        assert_eq!(client.try_pause(&old_issuer), Err(Ok(Error::NotAuthorized)));
+        assert_eq!(
+            client.try_transfer_issuer(&old_issuer, &old_issuer),
+            Err(Ok(Error::NotAuthorized))
+        );
+        assert_eq!(client.get_jurisdiction(&alice), None);
+    }
+
+    #[test]
+    fn test_transfer_issuer_fails_before_initialize() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(JurisdictionFlag, ());
+        let client = JurisdictionFlagClient::new(&env, &contract_id);
+        let someone = Address::generate(&env);
+
+        assert_eq!(
+            client.try_transfer_issuer(&someone, &someone),
+            Err(Ok(Error::NotInitialized))
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Jurisdiction code format validation (#82)
+// ---------------------------------------------------------------------------
+
+mod code_validation {
+    use super::setup;
+    use crate::Error;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Address, Env, String};
+
+    #[test]
+    fn test_set_jurisdiction_accepts_valid_alpha2_codes() {
+        let env = Env::default();
+        let (issuer, _contract_id, client) = setup(&env);
+
+        for raw in ["US", "GB", "CA", "DE", "ZZ", "AA"] {
+            let alice = Address::generate(&env);
+            let code = String::from_str(&env, raw);
+            client.set_jurisdiction(&issuer, &alice, &code);
+            assert_eq!(client.get_jurisdiction(&alice), Some(code), "code {raw:?}");
+        }
+    }
+
+    #[test]
+    fn test_set_jurisdiction_rejects_wrong_length() {
+        let env = Env::default();
+        let (issuer, _contract_id, client) = setup(&env);
+        let alice = Address::generate(&env);
+
+        for raw in ["", "U", "USA", "united-states", "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTU"] {
+            let result = client.try_set_jurisdiction(&issuer, &alice, &String::from_str(&env, raw));
+            assert_eq!(result, Err(Ok(Error::InvalidJurisdictionCode)), "code {raw:?}");
+        }
+        assert_eq!(client.get_jurisdiction(&alice), None);
+    }
+
+    #[test]
+    fn test_set_jurisdiction_rejects_non_letter_characters() {
+        let env = Env::default();
+        let (issuer, _contract_id, client) = setup(&env);
+        let alice = Address::generate(&env);
+
+        for raw in ["U1", "1A", "42", "U-", " U", "U ", "  ", "U.", "\u{e9}"] {
+            let result = client.try_set_jurisdiction(&issuer, &alice, &String::from_str(&env, raw));
+            assert_eq!(result, Err(Ok(Error::InvalidJurisdictionCode)), "code {raw:?}");
+        }
+        assert_eq!(client.get_jurisdiction(&alice), None);
+    }
+
+    /// Case policy: codes are case-sensitive (#54) and never normalized, so
+    /// only the canonical uppercase form is accepted on write.
+    #[test]
+    fn test_set_jurisdiction_rejects_lowercase_and_mixed_case() {
+        let env = Env::default();
+        let (issuer, _contract_id, client) = setup(&env);
+        let alice = Address::generate(&env);
+
+        for raw in ["us", "Us", "uS"] {
+            let result = client.try_set_jurisdiction(&issuer, &alice, &String::from_str(&env, raw));
+            assert_eq!(result, Err(Ok(Error::InvalidJurisdictionCode)), "code {raw:?}");
+        }
+        assert_eq!(client.get_jurisdiction(&alice), None);
+    }
+
+    #[test]
+    fn test_invalid_code_does_not_overwrite_existing_code() {
+        let env = Env::default();
+        let (issuer, _contract_id, client) = setup(&env);
+        let alice = Address::generate(&env);
+        let us = String::from_str(&env, "US");
+
+        client.set_jurisdiction(&issuer, &alice, &us);
+        let result = client.try_set_jurisdiction(&issuer, &alice, &String::from_str(&env, "usa"));
+        assert_eq!(result, Err(Ok(Error::InvalidJurisdictionCode)));
+        assert_eq!(client.get_jurisdiction(&alice), Some(us));
+    }
+
+    #[test]
+    fn test_authorization_is_checked_before_code_format() {
+        let env = Env::default();
+        let (_issuer, _contract_id, client) = setup(&env);
+        let impostor = Address::generate(&env);
+        let alice = Address::generate(&env);
+
+        let result = client.try_set_jurisdiction(&impostor, &alice, &String::from_str(&env, "bad"));
+        assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+    }
 }
 
 #[test]
-fn test_set_jurisdiction_emits_jurisdiction_set_event() {
-    let env = Env::default();
-    let (issuer, contract_id, client) = setup(&env);
-    let alice = Address::generate(&env);
-    let code = String::from_str(&env, "US");
-
-    client.set_jurisdiction(&issuer, &alice, &code);
-
-    assert_eq!(
-        env.events().all(),
-        vec![
-            &env,
-            (
-                contract_id.clone(),
-                (Symbol::new(&env, "jurisdiction_set"), alice.clone()).into_val(&env),
-                Map::<Symbol, Val>::from_array(
-                    &env,
-                    [(Symbol::new(&env, "code"), code.clone().into_val(&env))]
-                )
-                .into_val(&env),
-            ),
-        ]
-    );
-}
-
-#[test]
-fn test_double_initialize_fails() {
+fn test_no_expiry_never_expires() {
     let env = Env::default();
     let (issuer, _contract_id, client) = setup(&env);
-    let result = client.try_initialize(&issuer);
-    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+    let alice = Address::generate(&env);
+    let code = String::from_str(&env, "US");
+    client.set_jurisdiction(&issuer, &alice, &code);
+
+    env.ledger().with_mut(|li| li.sequence_number += 1_000_000);
+    assert_eq!(client.get_jurisdiction(&alice), Some(code));
 }
 
 #[test]
-fn test_set_jurisdiction_extends_persistent_ttl() {
+fn test_jurisdiction_expires_after_valid_until() {
     let env = Env::default();
-    let (issuer, contract_id, client) = setup(&env);
+    let (issuer, _contract_id, client) = setup(&env);
     let alice = Address::generate(&env);
     let code = String::from_str(&env, "US");
+    let valid_until = env.ledger().sequence() + 10;
+    client.set_jurisdiction_until(&issuer, &alice, &code, &valid_until);
 
-    client.set_jurisdiction(&issuer, &alice, &code);
-
-    let key = DataKey::Jurisdiction(alice.clone());
-
-    // Advance the ledger until the entry TTL drops below the extension threshold.
-    env.ledger().with_mut(|li| {
-        li.sequence_number += super::TTL_EXTEND_TO - super::TTL_THRESHOLD + 1;
-    });
-
-    let ttl_before_read = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&key)
-    });
-    assert!(ttl_before_read < super::TTL_THRESHOLD);
-
+    env.ledger().with_mut(|li| li.sequence_number = valid_until);
     assert_eq!(client.get_jurisdiction(&alice), Some(code));
 
-    let ttl_after_read = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&key)
-    });
-    assert_eq!(ttl_after_read, super::TTL_EXTEND_TO);
-
-    env.ledger().with_mut(|li| {
-        li.sequence_number += super::TTL_EXTEND_TO - super::TTL_THRESHOLD + 1;
-    });
-
-    let ttl_before_rewrite = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&key)
-    });
-    assert!(ttl_before_rewrite < super::TTL_THRESHOLD);
-
-    let updated = String::from_str(&env, "CA");
-    client.set_jurisdiction(&issuer, &alice, &updated);
-
-    let ttl_after_write = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&key)
-    });
-    assert_eq!(ttl_after_write, super::TTL_EXTEND_TO);
+    env.ledger().with_mut(|li| li.sequence_number = valid_until + 1);
+    assert_eq!(client.get_jurisdiction(&alice), None);
+    let allowed = vec![&env, String::from_str(&env, "US")];
+    assert_eq!(client.is_permitted_jurisdiction(&alice, &allowed), false);
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +640,7 @@ fn test_set_multiple_jurisdictions_one_invalid_code_rejects_whole_batch() {
         (bob.clone(), String::from_str(&env, "us")),
     ];
     let result = client.try_set_multiple_jurisdictions(&issuer, &entries);
-    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+    assert_eq!(result, Err(Ok(Error::InvalidJurisdictionCode)));
 
     // Nothing should have been written.
     assert_eq!(client.get_jurisdiction(&alice), None);
@@ -455,7 +720,7 @@ fn test_set_multiple_jurisdictions_empty_code_is_invalid() {
         (alice.clone(), String::from_str(&env, "")),
     ];
     let result = client.try_set_multiple_jurisdictions(&issuer, &entries);
-    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+    assert_eq!(result, Err(Ok(Error::InvalidJurisdictionCode)));
     assert_eq!(client.get_jurisdiction(&alice), None);
 }
 

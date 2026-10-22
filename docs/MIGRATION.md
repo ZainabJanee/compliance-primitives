@@ -92,7 +92,7 @@ corresponding functions on the wrapper.
 | Your code | `allowlist-token` equivalent |
 |---|---|
 | `is_allowed(addr)` | `allowlist_token.is_allowed(&addr)` |
-| `add_to_allowlist(admin, addr)` | `allowlist_token.add_to_allowlist(&admin, &addr)` |
+| `add_to_allowlist(admin, addr)` | `allowlist_token.add_to_allowlist(&admin, &addr, &None)` (pass `&Some(ledger)` to auto-expire) |
 | `remove_from_allowlist(admin, addr)` | `allowlist_token.remove_from_allowlist(&admin, &addr)` |
 | Inline allowlist check in `transfer` | Handled automatically by the wrapper |
 

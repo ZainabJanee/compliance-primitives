@@ -93,6 +93,22 @@ data   : { "amount": <i128> }
 > both in topics is intentional and consistent with the spirit of the
 > convention.
 
+#### `AdminTransferred`
+
+Emitted when the admin role changes hands — either immediately via
+`transfer_admin(current_admin, new_admin)`, or when a proposed admin
+completes the two-step `propose_admin` / `accept_admin` flow.
+
+```
+topics : ["admin_transferred", <old_admin: Address>, <new_admin: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `old_admin` | `Address` | topic | Admin before the transfer (loses all privileges immediately) |
+| `new_admin` | `Address` | topic | Admin after the transfer |
+
 ---
 
 ### `denylist-gate`
@@ -126,6 +142,90 @@ data   : {}
 |---|---|---|---|
 | `address` | `Address` | topic | Address removed from the denylist |
 
+#### `AdminTransferred`
+
+Emitted when `transfer_admin(current_admin, new_admin)` reassigns the admin
+role. Takes effect immediately and is not blocked by `pause`.
+
+```
+topics : ["admin_transferred", <old_admin: Address>, <new_admin: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `old_admin` | `Address` | topic | Admin before the transfer (loses all privileges immediately) |
+| `new_admin` | `Address` | topic | Admin after the transfer |
+
+#### `Paused`
+
+Emitted when the admin pauses denylist mutations via `pause(admin)`.
+
+```
+topics : ["paused", <admin: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `admin` | `Address` | topic | Admin address that paused the contract |
+
+#### `Unpaused`
+
+Emitted when the admin resumes denylist mutations via `unpause(admin)`.
+
+```
+topics : ["unpaused", <admin: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `admin` | `Address` | topic | Admin address that unpaused the contract |
+
+#### `ComplianceOfficerSet`
+
+Emitted when `set_compliance_officer(admin, officer)` assigns the
+compliance-officer role. Replaces any previously assigned officer.
+
+```
+topics : ["compliance_officer_set", <officer: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `officer` | `Address` | topic | Address newly assigned the compliance-officer role |
+
+#### `ComplianceOfficerRevoked`
+
+Emitted when `revoke_compliance_officer(admin)` removes an assigned
+compliance officer. Not emitted if no officer was assigned (the call is a
+no-op).
+
+```
+topics : ["compliance_officer_revoked", <officer: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `officer` | `Address` | topic | Address whose compliance-officer role was revoked |
+
+#### `AuditLogSet`
+
+Emitted when `set_audit_log(admin, audit_log)` configures the append-only
+audit log contract that receives denylist mutation records.
+
+```
+topics : ["audit_log_set", <audit_log: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `audit_log` | `Address` | topic | Audit-log contract address now receiving records |
+
 ---
 
 ### `jurisdiction-flag`
@@ -152,13 +252,31 @@ data   : { "code": <String> }
 > rather than as a topic is therefore intentional and consistent with the
 > topic/data split convention above.
 
+#### `IssuerTransferred`
+
+Emitted when `transfer_issuer(current_issuer, new_issuer)` reassigns the
+issuer role. Takes effect immediately, is not blocked by `pause`, and leaves
+any compliance-officer assignment unchanged.
+
+```
+topics : ["issuer_transferred", <old_issuer: Address>, <new_issuer: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `old_issuer` | `Address` | topic | Issuer before the transfer (loses all privileges immediately) |
+| `new_issuer` | `Address` | topic | Issuer after the transfer |
+
 ---
 
 ### `circuit-breaker`
 
 #### `Frozen`
 
-Emitted when the admin freezes the circuit breaker.
+Emitted when the admin freezes the circuit breaker. Also emitted when the
+contract is already frozen — the state write is a no-op but the event is still
+emitted for auditability.
 
 ```
 topics : ["frozen", <admin: Address>]
@@ -171,7 +289,9 @@ data   : {}
 
 #### `Unfrozen`
 
-Emitted when the admin unfreezes the circuit breaker.
+Emitted when the admin unfreezes the circuit breaker. Also emitted when the
+contract is not frozen — the state write is a no-op but the event is still
+emitted for auditability.
 
 ```
 topics : ["unfrozen", <admin: Address>]
@@ -181,6 +301,115 @@ data   : {}
 | Field | Type | Placement | Description |
 |---|---|---|---|
 | `admin` | `Address` | topic | Admin address that unfroze the contract |
+
+> **Note — no admin-transfer event**: unlike `allowlist-token` and
+> `denylist-gate`, `circuit-breaker`'s `propose_admin` / `accept_admin` flow
+> does not currently emit an `AdminTransferred` event. Indexers must read
+> contract state to track admin changes.
+
+#### `UpgradePerformed`
+
+Emitted when the admin upgrades the contract to a new WASM hash.
+
+```
+topics : ["upgrade_performed", <admin: Address>]
+data   : { new_wasm_hash: BytesN<32> }
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `admin` | `Address` | topic | Admin address that performed the upgrade |
+| `new_wasm_hash` | `BytesN<32>` | data | WASM hash the contract was upgraded to |
+
+---
+
+### `compliance-aggregator`
+
+#### `AdminSet`
+
+Emitted when the aggregator's admin is set, either during `initialize` or
+when `set_admin` replaces it.
+
+```
+topics : ["admin_set", <admin: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `admin` | `Address` | topic | Admin address after the change |
+
+#### `DenylistGateSet`
+
+Emitted when the `denylist-gate` address is registered, either during
+`initialize` (if provided) or when `set_denylist_gate` replaces it.
+
+```
+topics : ["denylist_gate_set", <gate: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `gate` | `Address` | topic | `denylist-gate` contract address now registered |
+
+#### `JurisdictionFlagSet`
+
+Emitted when the `jurisdiction-flag` address is registered, either during
+`initialize` (if provided) or when `set_jurisdiction_flag` replaces it.
+
+```
+topics : ["jurisdiction_flag_set", <flag: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `flag` | `Address` | topic | `jurisdiction-flag` contract address now registered |
+
+#### `CircuitBreakerSet`
+
+Emitted when the `circuit-breaker` address is registered, either during
+`initialize` (if provided) or when `set_circuit_breaker` replaces it.
+
+```
+topics : ["circuit_breaker_set", <breaker: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `breaker` | `Address` | topic | `circuit-breaker` contract address now registered |
+
+#### `UpgradePerformed`
+
+Emitted when the admin swaps the contract's WASM via `upgrade`. Emitted
+before the WASM swap so the upgrade is visible to indexers.
+
+```
+topics : ["upgrade_performed", <admin: Address>]
+data   : { "new_wasm_hash": <BytesN<32>> }
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `admin` | `Address` | topic | Admin that authorized the upgrade |
+| `new_wasm_hash` | `BytesN<32>` | data | Hash of the WASM the contract is upgraded to |
+
+#### `Paused` / `Unpaused`
+
+Emitted by `pause` and `unpause` respectively. These are raw events published
+via `env.events().publish((), Symbol)` rather than `#[contractevent]` structs,
+so they carry an empty topic vector and the event name as the data payload.
+
+```
+topics : []
+data   : "Paused" | "Unpaused"   (Symbol)
+```
+
+> **Note — no topics**: because these events have no address topic, they
+> cannot be filtered by address. Index them by contract address and by the
+> `data` symbol. This shape differs from every other event in this file.
 
 ---
 

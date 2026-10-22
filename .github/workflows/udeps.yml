@@ -1,0 +1,35 @@
+name: cargo-udeps (unused deps)
+
+on:
+  # Run on a weekly schedule to catch unused dependencies accumulating over time.
+  # cargo-udeps requires nightly, so we run it separately from the main CI.
+  schedule:
+    - cron: "0 3 * * 1"   # every Monday at 03:00 UTC
+  # Allow manual trigger from the Actions tab.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  udeps:
+    name: cargo-udeps check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust (required by cargo-udeps)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked
+
+      - name: Check for unused dependencies
+        # +nightly is required; the check is a warning in CI rather than a
+        # hard failure so that a stale nightly toolchain doesn't block PRs.
+        # Flip continue-on-error to false once this has been stable for a while.
+        continue-on-error: true
+        run: cargo +nightly udeps --workspace --all-targets

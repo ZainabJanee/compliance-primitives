@@ -1,4 +1,6 @@
 /target
+fuzz/target/
+fuzz/artifacts/
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store

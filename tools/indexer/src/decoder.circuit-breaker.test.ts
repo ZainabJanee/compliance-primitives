@@ -116,9 +116,9 @@ describe("decodeEvent — circuit-breaker Frozen", () => {
     assert.equal(decoded.addressTo,    null);
     assert.equal(decoded.amount,       null);
     assert.equal(decoded.jurisdiction, null);
-    assert.equal(decoded.policyFrom,   null);
-    assert.equal(decoded.policyTo,     null);
-    assert.equal(decoded.policyPassed, null);
+    assert.equal(decoded.kind,         null);
+    assert.equal(decoded.source,       null);
+    assert.equal(decoded.detail,       null);
   });
 
   it("stores rawTopics and rawData", () => {
@@ -167,9 +167,9 @@ describe("decodeEvent — circuit-breaker Unfrozen", () => {
     assert.equal(decoded.addressTo,    null);
     assert.equal(decoded.amount,       null);
     assert.equal(decoded.jurisdiction, null);
-    assert.equal(decoded.policyFrom,   null);
-    assert.equal(decoded.policyTo,     null);
-    assert.equal(decoded.policyPassed, null);
+    assert.equal(decoded.kind,         null);
+    assert.equal(decoded.source,       null);
+    assert.equal(decoded.detail,       null);
   });
 });
 
@@ -211,7 +211,8 @@ describe("regression — existing AllowAdd event unaffected", () => {
     assert.ok(decoded !== null);
     assert.equal(decoded.eventType, "AllowAdd");
     assert.ok(decoded.address !== null);
-    assert.equal(decoded.policyFrom,   null);
-    assert.equal(decoded.policyPassed, null);
+    assert.equal(decoded.kind,   null);
+    assert.equal(decoded.source, null);
+    assert.equal(decoded.detail, null);
   });
 });

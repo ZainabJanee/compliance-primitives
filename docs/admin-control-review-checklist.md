@@ -69,7 +69,10 @@ or `contracts/circuit-breaker`.
       (e.g. `set_admin`), confirm it requires the *current* admin's auth,
       consider whether in-flight `Frozen` state should be preserved across
       a rotation, and add the same test coverage `freeze`/`unfreeze` have
-      (happy path + non-admin rejection).
+      (happy path + non-admin rejection). The existing two-step
+      `propose_admin`/`accept_admin` flow now also has `cancel_admin_proposal`
+      — verify cancellation requires the current admin and that accepting
+      after cancellation correctly returns `NoPendingAdmin`.
 - [ ] **Consumers that check the breaker do so *before* any state
       mutation.** This isn't enforced by the breaker contract itself, but
       a review of a `circuit-breaker`-consuming change should confirm the

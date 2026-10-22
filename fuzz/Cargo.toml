@@ -1,0 +1,40 @@
+[package]
+name = "compliance-primitives-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+soroban-sdk = { version = "27.0.0", features = ["testutils"] }
+denylist-gate = { path = "../contracts/denylist-gate" }
+jurisdiction-flag = { path = "../contracts/jurisdiction-flag" }
+
+# Standalone workspace: cargo-fuzz needs nightly and must not join the
+# root workspace's resolver or lockfile.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "denylist_gate_sequences"
+path = "fuzz_targets/denylist_gate_sequences.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jurisdiction_set_get_sequences"
+path = "fuzz_targets/jurisdiction_set_get_sequences.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jurisdiction_multicode_add_remove_sequences"
+path = "fuzz_targets/jurisdiction_multicode_add_remove_sequences.rs"
+test = false
+doc = false
+bench = false

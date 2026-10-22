@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import initSqlJs from "sql.js/dist/sql-asm.js";
 import { ComplianceDb } from "./db.js";
 import type { RawEvent } from "./db.js";
 
@@ -26,6 +27,9 @@ function makeEvent(
     addressTo: null,
     amount: null,
     jurisdiction: null,
+    kind: null,
+    source: null,
+    detail: null,
     signerAddress: null,
     newThreshold: null,
     validCount: null,
@@ -67,6 +71,47 @@ test("ComplianceDb: open existing database loads data", async () => {
   }
 });
 
+test("ComplianceDb: migrates an existing v2 events table before creating new indexes", async () => {
+  const dbPath = makeTempDbPath();
+  const SQL = await initSqlJs();
+  const legacy = new SQL.Database();
+  legacy.run("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+  legacy.run("INSERT INTO schema_migrations (version, applied_at) VALUES (1, 'old'), (2, 'old')");
+  legacy.run(`CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ledger_sequence INTEGER NOT NULL,
+    timestamp INTEGER,
+    contract_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    address TEXT,
+    address_to TEXT,
+    amount TEXT,
+    jurisdiction TEXT,
+    kind TEXT,
+    source TEXT,
+    detail TEXT,
+    raw_topics TEXT NOT NULL,
+    raw_data TEXT NOT NULL,
+    source_tx_hash TEXT
+  )`);
+  legacy.run("INSERT INTO events (ledger_sequence, contract_id, event_type, raw_topics, raw_data) VALUES (7, 'OLD_CONTRACT', 'AllowAdd', '[]', '')");
+  fs.writeFileSync(dbPath, Buffer.from(legacy.export()));
+  legacy.close();
+
+  try {
+    const db = await ComplianceDb.open(dbPath);
+    assert.equal(db.getEventCount("OLD_CONTRACT"), 1);
+    const versions = (db as any).db.exec("SELECT MAX(version) FROM schema_migrations");
+    assert.equal(versions[0].values[0][0], 3);
+    const columns = (db as any).db.exec("PRAGMA table_info(events)")[0].values.map((row: unknown[]) => row[1]);
+    assert.ok(columns.includes("signer_address"));
+    assert.ok(columns.includes("policy_passed"));
+    db.close();
+  } finally {
+    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  }
+});
+
 test("ComplianceDb: applyEvents inserts event into events table", async () => {
   const dbPath = makeTempDbPath();
   try {
@@ -82,6 +127,29 @@ test("ComplianceDb: applyEvents inserts event into events table", async () => {
     assert.equal(row[4], "AllowAdd"); // event_type
     assert.equal(row[5], "GTEST1"); // address
 
+    db.close();
+  } finally {
+    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  }
+});
+
+test("ComplianceDb: persists policy and multisig event fields", async () => {
+  const dbPath = makeTempDbPath();
+  try {
+    const db = await ComplianceDb.open(dbPath);
+    db.applyEvents([makeEvent({
+      eventType: "PolicyResult",
+      address: null,
+      signerAddress: "GSIGNER",
+      newThreshold: 2,
+      validCount: 3,
+      policyFrom: "GFROM",
+      policyTo: "GTO",
+      policyPassed: false,
+    })]);
+
+    const result = (db as any).db.exec("SELECT signer_address, new_threshold, valid_count, policy_from, policy_to, policy_passed FROM events");
+    assert.deepEqual(result[0].values[0], ["GSIGNER", 2, 3, "GFROM", "GTO", 0]);
     db.close();
   } finally {
     if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);

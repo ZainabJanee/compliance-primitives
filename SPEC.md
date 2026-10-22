@@ -12,6 +12,8 @@ This document specifies the security assumptions, invariants, and threat models 
 
 ## 1. Denylist-Gate Contract
 
+**Source**: [`contracts/denylist-gate/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/denylist-gate/src/lib.rs)
+
 ### 1.1 Purpose
 
 Maintain a standalone denylist contract that other contracts call via cross-contract invocation to check if an address is clear to transact.
@@ -122,15 +124,17 @@ Once `initialize()` succeeds, the admin is stored, and any second call finds the
 
 | Invariant | Test | File |
 |-----------|------|------|
-| 1.3.1 | `test_check_returns_false_for_denied` | denylist-gate/src/test.rs |
-| 1.3.2 | `test_check_returns_true_for_non_denied` | denylist-gate/src/test.rs |
-| 1.3.3 | `test_add_to_denylist_fails_if_not_admin` | denylist-gate/src/test.rs |
-| 1.3.4 | `test_double_initialize_fails` | denylist-gate/src/test.rs |
-| 1.3.5 | `test_add_to_denylist_fails_before_initialize` | denylist-gate/src/test.rs |
+| 1.3.1 | `test_check_returns_false_for_denied` | [`denylist-gate/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/denylist-gate/src/test.rs) |
+| 1.3.2 | `test_check_returns_true_for_non_denied` | [`denylist-gate/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/denylist-gate/src/test.rs) |
+| 1.3.3 | `test_add_to_denylist_fails_if_not_admin` | [`denylist-gate/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/denylist-gate/src/test.rs) |
+| 1.3.4 | `test_double_initialize_fails` | [`denylist-gate/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/denylist-gate/src/test.rs) |
+| 1.3.5 | `test_add_to_denylist_fails_before_initialize` | [`denylist-gate/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/denylist-gate/src/test.rs) |
 
 ---
 
 ## 2. Allowlist-Token Contract
+
+**Source**: [`contracts/allowlist-token/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/allowlist-token/src/lib.rs)
 
 ### 2.1 Purpose
 
@@ -224,15 +228,17 @@ Wrap an existing SEP-41 token and only permit `transfer` calls between two addre
 
 | Invariant | Test | File |
 |-----------|------|------|
-| 2.3.1 | `test_transfer_blocks_if_from_not_allowed` | allowlist-token/src/test.rs |
-| 2.3.2 | `test_transfer_succeeds_if_both_allowed` | allowlist-token/src/test.rs |
-| 2.3.3 | `test_add_to_allowlist_fails_if_not_admin` | allowlist-token/src/test.rs |
-| 2.3.4 | `test_transfer_blocks_if_from_not_allowed` | allowlist-token/src/test.rs |
-| 2.3.5 | `test_add_to_allowlist_emits_event` | allowlist-token/src/test.rs |
+| 2.3.1 | `test_transfer_blocks_if_from_not_allowed` | [`allowlist-token/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/allowlist-token/src/test.rs) |
+| 2.3.2 | `test_transfer_succeeds_if_both_allowed` | [`allowlist-token/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/allowlist-token/src/test.rs) |
+| 2.3.3 | `test_add_to_allowlist_fails_if_not_admin` | [`allowlist-token/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/allowlist-token/src/test.rs) |
+| 2.3.4 | `test_transfer_blocks_if_from_not_allowed` | [`allowlist-token/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/allowlist-token/src/test.rs) |
+| 2.3.5 | `test_add_to_allowlist_emits_event` | [`allowlist-token/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/allowlist-token/src/test.rs) |
 
 ---
 
 ## 3. Jurisdiction-Flag Contract
+
+**Source**: [`contracts/jurisdiction-flag/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/jurisdiction-flag/src/lib.rs)
 
 ### 3.1 Purpose
 
@@ -339,16 +345,18 @@ Returns `true` only if the address has a code AND it matches at least one in `al
 
 | Invariant | Test | File |
 |-----------|------|------|
-| 3.3.1 | `test_set_and_get_jurisdiction` | jurisdiction-flag/src/test.rs |
-| 3.3.2 | `test_set_jurisdiction_rejects_non_issuer` | jurisdiction-flag/src/test.rs |
-| 3.3.3 | `test_is_permitted_jurisdiction_true_when_code_in_list` | jurisdiction-flag/src/test.rs |
-| 3.3.4 | `test_upgrade_preserves_jurisdiction_storage` | jurisdiction-flag/src/test.rs |
-| 3.3.5 | `test_upgrade_requires_issuer_auth` | jurisdiction-flag/src/test.rs |
+| 3.3.1 | `test_set_and_get_jurisdiction` | [`jurisdiction-flag/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/jurisdiction-flag/src/test.rs) |
+| 3.3.2 | `test_set_jurisdiction_rejects_non_issuer` | [`jurisdiction-flag/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/jurisdiction-flag/src/test.rs) |
+| 3.3.3 | `test_is_permitted_jurisdiction_true_when_code_in_list` | [`jurisdiction-flag/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/jurisdiction-flag/src/test.rs) |
+| 3.3.4 | `test_upgrade_preserves_jurisdiction_storage` | [`jurisdiction-flag/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/jurisdiction-flag/src/test.rs) |
+| 3.3.5 | `test_upgrade_requires_issuer_auth` | [`jurisdiction-flag/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/jurisdiction-flag/src/test.rs) |
 | 3.3.6 | *GAP* — no explicit test for event emission | — |
 
 ---
 
 ## 4. Audit-Log Contract
+
+**Source**: [`contracts/audit-log/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/audit-log/src/lib.rs)
 
 ### 4.1 Purpose
 
@@ -439,15 +447,17 @@ Maintain an on-chain, append-only audit trail of compliance events. Other primit
 | Invariant | Test | File |
 |-----------|------|------|
 | 4.3.1 | *GAP* — no explicit test for `record()` before `initialize()` | — |
-| 4.3.2 | `test_record_and_read_back`, `test_entry_count` | audit-log/src/test.rs |
-| 4.3.3 | `test_unauthorized_record_rejected` | audit-log/src/test.rs |
-| 4.3.4 | `test_get_entry_out_of_range_returns_none` | audit-log/src/test.rs |
-| 4.3.5 | `test_record_emits_event` | audit-log/src/test.rs |
-| 4.3.6 | `test_double_initialize_fails` | audit-log/src/test.rs |
+| 4.3.2 | `test_record_and_read_back`, `test_entry_count` | [`audit-log/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/audit-log/src/test.rs) |
+| 4.3.3 | `test_unauthorized_record_rejected` | [`audit-log/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/audit-log/src/test.rs) |
+| 4.3.4 | `test_get_entry_out_of_range_returns_none` | [`audit-log/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/audit-log/src/test.rs) |
+| 4.3.5 | `test_record_emits_event` | [`audit-log/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/audit-log/src/test.rs) |
+| 4.3.6 | `test_double_initialize_fails` | [`audit-log/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/audit-log/src/test.rs) |
 
 ---
 
 ## 5. Circuit-Breaker Contract
+
+**Source**: [`contracts/circuit-breaker/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/circuit-breaker/src/lib.rs)
 
 ### 5.1 Purpose
 
@@ -519,14 +529,16 @@ Provide a single, shared, admin-controlled emergency stop (`freeze`/`unfreeze`/`
 
 | Invariant | Test | File |
 |-----------|------|------|
-| 5.3.1 | `test_is_frozen_defaults_to_false` | circuit-breaker/src/test.rs |
-| 5.3.2 | `test_non_admin_cannot_freeze_or_unfreeze` | circuit-breaker/src/test.rs |
-| 5.3.3 | `test_admin_can_freeze_and_unfreeze` | circuit-breaker/src/test.rs |
+| 5.3.1 | `test_is_frozen_defaults_to_false` | [`circuit-breaker/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/circuit-breaker/src/test.rs) |
+| 5.3.2 | `test_non_admin_cannot_freeze_or_unfreeze` | [`circuit-breaker/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/circuit-breaker/src/test.rs) |
+| 5.3.3 | `test_admin_can_freeze_and_unfreeze` | [`circuit-breaker/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/circuit-breaker/src/test.rs) |
 | 5.3.4 | *GAP* — no explicit double-initialize test | — |
 
 ---
 
 ## 6. Compliance-Aggregator Contract
+
+**Source**: [`contracts/compliance-aggregator/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/compliance-aggregator/src/lib.rs)
 
 ### 6.1 Purpose
 
@@ -623,16 +635,18 @@ Reduce a consumer's cross-contract call overhead by batching a `denylist-gate` c
 
 | Invariant | Test | File |
 |-----------|------|------|
-| 6.3.1 | `test_both_checks_pass`, `test_denylist_fail_jurisdiction_pass`, `test_denylist_pass_jurisdiction_fail`, `test_both_checks_fail` | compliance-aggregator/src/test.rs |
-| 6.3.2 | `test_check_address_denylist_only_pass`, `test_check_address_jurisdiction_only_pass` | compliance-aggregator/src/test.rs |
-| 6.3.3 | `test_check_address_no_checks_registered`, `test_check_all_no_checks_registered` | compliance-aggregator/src/test.rs |
-| 6.3.4 | `test_check_all_empty_list_error` | compliance-aggregator/src/test.rs |
-| 6.3.5 | `test_set_admin_rejects_non_admin`, `test_set_denylist_gate_rejects_non_admin`, `test_set_jurisdiction_flag_rejects_non_admin` | compliance-aggregator/src/test.rs |
-| 6.3.6 | `test_check_all_mixed_results` | compliance-aggregator/src/test.rs |
+| 6.3.1 | `test_both_checks_pass`, `test_denylist_fail_jurisdiction_pass`, `test_denylist_pass_jurisdiction_fail`, `test_both_checks_fail` | [`compliance-aggregator/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/compliance-aggregator/src/test.rs) |
+| 6.3.2 | `test_check_address_denylist_only_pass`, `test_check_address_jurisdiction_only_pass` | [`compliance-aggregator/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/compliance-aggregator/src/test.rs) |
+| 6.3.3 | `test_check_address_no_checks_registered`, `test_check_all_no_checks_registered` | [`compliance-aggregator/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/compliance-aggregator/src/test.rs) |
+| 6.3.4 | `test_check_all_empty_list_error` | [`compliance-aggregator/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/compliance-aggregator/src/test.rs) |
+| 6.3.5 | `test_set_admin_rejects_non_admin`, `test_set_denylist_gate_rejects_non_admin`, `test_set_jurisdiction_flag_rejects_non_admin` | [`compliance-aggregator/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/compliance-aggregator/src/test.rs) |
+| 6.3.6 | `test_check_all_mixed_results` | [`compliance-aggregator/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/compliance-aggregator/src/test.rs) |
 
 ---
 
 ## 7. Multisig-Admin Contract
+
+**Source**: [`contracts/multisig-admin/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/multisig-admin/src/lib.rs)
 
 ### 7.1 Purpose
 
@@ -726,16 +740,18 @@ Implement M-of-N multisig authorization via Soroban's `CustomAccountInterface`, 
 
 | Invariant | Test | File |
 |-----------|------|------|
-| 7.3.1 | `test_multisig_as_denylist_admin_with_mock_auth`, `test_threshold_not_met_error_value` | multisig-admin/src/test.rs |
-| 7.3.2 | `test_invalid_threshold_zero_rejected`, `test_invalid_threshold_exceeds_signer_count`, `test_remove_signer_rejected_when_count_drops_below_threshold`, `test_update_threshold_invalid_rejected` | multisig-admin/src/test.rs |
-| 7.3.3 | `test_signer_update_requires_multisig_auth` | multisig-admin/src/test.rs |
-| 7.3.4 | `test_add_duplicate_signer_rejected` | multisig-admin/src/test.rs |
-| 7.3.5 | `test_remove_signer_not_found_rejected` | multisig-admin/src/test.rs |
-| 7.3.6 | `test_double_initialize_fails` | multisig-admin/src/test.rs |
+| 7.3.1 | `test_multisig_as_denylist_admin_with_mock_auth`, `test_threshold_not_met_error_value` | [`multisig-admin/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/multisig-admin/src/test.rs) |
+| 7.3.2 | `test_invalid_threshold_zero_rejected`, `test_invalid_threshold_exceeds_signer_count`, `test_remove_signer_rejected_when_count_drops_below_threshold`, `test_update_threshold_invalid_rejected` | [`multisig-admin/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/multisig-admin/src/test.rs) |
+| 7.3.3 | `test_signer_update_requires_multisig_auth` | [`multisig-admin/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/multisig-admin/src/test.rs) |
+| 7.3.4 | `test_add_duplicate_signer_rejected` | [`multisig-admin/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/multisig-admin/src/test.rs) |
+| 7.3.5 | `test_remove_signer_not_found_rejected` | [`multisig-admin/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/multisig-admin/src/test.rs) |
+| 7.3.6 | `test_double_initialize_fails` | [`multisig-admin/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/multisig-admin/src/test.rs) |
 
 ---
 
 ## 8. Pausable (Shared Library)
+
+**Source**: [`contracts/pausable/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/pausable/src/lib.rs)
 
 ### 8.1 Purpose
 
@@ -809,14 +825,16 @@ Provide identical pause/unpause/`require_not_paused` logic to `allowlist-token`,
 
 | Invariant | Test | File |
 |-----------|------|------|
-| 8.3.1 | `test_not_paused_by_default` | pausable/src/lib.rs |
-| 8.3.2 | `test_pause_and_unpause` | pausable/src/lib.rs |
-| 8.3.3 | `test_pause_is_idempotent` | pausable/src/lib.rs |
-| 8.3.4 | `test_require_not_paused_ok_when_unpaused`, `test_require_not_paused_err_when_paused` | pausable/src/lib.rs |
+| 8.3.1 | `test_not_paused_by_default` | [`pausable/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/pausable/src/lib.rs) |
+| 8.3.2 | `test_pause_and_unpause` | [`pausable/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/pausable/src/lib.rs) |
+| 8.3.3 | `test_pause_is_idempotent` | [`pausable/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/pausable/src/lib.rs) |
+| 8.3.4 | `test_require_not_paused_ok_when_unpaused`, `test_require_not_paused_err_when_paused` | [`pausable/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/pausable/src/lib.rs) |
 
 ---
 
 ## 9. Policy-Engine Contract
+
+**Source**: [`contracts/policy-engine/src/lib.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/policy-engine/src/lib.rs)
 
 ### 9.1 Purpose
 
@@ -903,8 +921,8 @@ Compose an admin-managed, mutable list of compliance checks against arbitrary pr
 
 | Invariant | Test | File |
 |-----------|------|------|
-| 9.3.1 | `test_all_checks_pass`, `test_one_check_fails_and_semantics` | policy-engine/src/test.rs |
-| 9.3.2 | `test_one_check_passes_or_semantics` | policy-engine/src/test.rs |
+| 9.3.1 | `test_all_checks_pass`, `test_one_check_fails_and_semantics` | [`policy-engine/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/policy-engine/src/test.rs) |
+| 9.3.2 | `test_one_check_passes_or_semantics` | [`policy-engine/src/test.rs`](https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/contracts/policy-engine/src/test.rs) |
 | 9.3.3 | *GAP* — no explicit empty-list `Any` test | — |
 | 9.3.4 | *GAP* — no explicit event-emission test (existing tests don't assert on `env.events()`) | — |
 | 9.3.5 | *GAP* — no explicit non-admin-rejection test for `add_check`/`remove_check` | — |

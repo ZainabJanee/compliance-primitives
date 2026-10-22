@@ -42,9 +42,16 @@ ENV JURISDICTION_CONTRACT_ID=""
 ENV DB_PATH="/data/compliance.db"
 ENV POLL_INTERVAL_MS="5000"
 ENV START_LEDGER="0"
+# Set HEALTH_PORT to expose the /health and /status HTTP endpoints.
+ENV HEALTH_PORT=""
 
 # Non-root user for container security
 RUN addgroup -S indexer && adduser -S indexer -G indexer
 USER indexer
+
+# Optional liveness probe — only active when HEALTH_PORT is set.
+# Override with `docker run --health-cmd` if you use a different port.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD [ -z "$HEALTH_PORT" ] && exit 0 || wget -qO- http://localhost:${HEALTH_PORT}/health | grep -q '"ok":true' || exit 1
 
 CMD ["node", "dist/index.js"]

@@ -7,7 +7,7 @@ This page lists the public interfaces exposed by the compliance primitives. The 
 The wrapper forwards a transfer only when both participants are on the allowlist.
 
 ```text
-add_to_allowlist(admin, address)
+add_to_allowlist(admin, address, expiration_ledger)
 is_allowed(address) -> bool
 transfer(from, to, amount) -> bool
 ```

@@ -64,8 +64,8 @@ fn test_composition_succeeds_when_both_allowlisted_and_clear_on_gate() {
     example_token_client.mint(&alice, &1_000);
 
     // Add both alice and bob to the allowlist
-    allowlist_token_client.add_to_allowlist(&allowlist_admin, &alice);
-    allowlist_token_client.add_to_allowlist(&allowlist_admin, &bob);
+    allowlist_token_client.add_to_allowlist(&allowlist_admin, &alice, &None);
+    allowlist_token_client.add_to_allowlist(&allowlist_admin, &bob, &None);
 
     // Perform transfer through AllowlistToken
     let success = allowlist_token_client.transfer(&alice, &bob, &400);
@@ -95,8 +95,8 @@ fn test_composition_blocked_at_gate_layer_when_allowlisted_but_denylisted() {
     example_token_client.mint(&alice, &1_000);
 
     // Both are allowlisted
-    allowlist_token_client.add_to_allowlist(&allowlist_admin, &alice);
-    allowlist_token_client.add_to_allowlist(&allowlist_admin, &bob);
+    allowlist_token_client.add_to_allowlist(&allowlist_admin, &alice, &None);
+    allowlist_token_client.add_to_allowlist(&allowlist_admin, &bob, &None);
 
     // But bob is added to the denylist gate
     DenylistGateClient::new(&env, &gate_id).add_to_denylist(&gate_admin, &bob);
@@ -129,7 +129,7 @@ fn test_composition_blocked_at_allowlist_layer_before_gate_consulted() {
     example_token_client.mint(&alice, &1_000);
 
     // Only alice is allowlisted; bob is NOT allowlisted
-    allowlist_token_client.add_to_allowlist(&allowlist_admin, &alice);
+    allowlist_token_client.add_to_allowlist(&allowlist_admin, &alice, &None);
 
     // Transfer through AllowlistToken returns Ok(false) as it blocks before reaching ExampleToken / DenylistGate
     let success = allowlist_token_client.transfer(&alice, &bob, &400);

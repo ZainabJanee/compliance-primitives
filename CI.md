@@ -18,6 +18,9 @@ Runs `cargo test --workspace budget_regression`. Catches unintended instruction 
 ### wasm32v1-none build
 Builds `cargo build --workspace --target wasm32v1-none --release`. Ensures all contracts compile to valid wasm.
 
+### wasm size budget
+Runs `scripts/check-wasm-size.sh` (locally: `make check-wasm-size`). Builds every contract listed in `wasm-size-budgets.toml` — including `allowlist-token`, `denylist-gate`, and `jurisdiction-flag` — to `wasm32v1-none` and fails if a binary exceeds its recorded baseline by more than 10%. On failure it names the contract and reports how many bytes it is over its limit and its baseline. See the header of `wasm-size-budgets.toml` for the budget rationale and how to update a baseline.
+
 ### cargo deny check
 Runs `cargo-deny` to check for:
 - Dependency security advisories (via RustSec)

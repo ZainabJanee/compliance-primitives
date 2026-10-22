@@ -78,7 +78,7 @@ impl SamplePausableConsumer {
 
     // Step 4: require_not_paused placed at the top of every state-mutating method
     pub fn set_flag(env: Env, admin: Address, value: u32) -> Result<(), ConsumerError> {
-        pausable::require_not_paused(&env, ConsumerError::ContractPaused)?;
+        pausable::require_not_paused_or(&env, ConsumerError::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::FlagValue, &value);
         Ok(())
@@ -90,7 +90,7 @@ impl SamplePausableConsumer {
         key: String,
         val: u32,
     ) -> Result<(), ConsumerError> {
-        pausable::require_not_paused(&env, ConsumerError::ContractPaused)?;
+        pausable::require_not_paused_or(&env, ConsumerError::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         env.storage().persistent().set(&DataKey::Record(key), &val);
         Ok(())
@@ -102,7 +102,7 @@ impl SamplePausableConsumer {
         keys: Vec<String>,
         val: u32,
     ) -> Result<(), ConsumerError> {
-        pausable::require_not_paused(&env, ConsumerError::ContractPaused)?;
+        pausable::require_not_paused_or(&env, ConsumerError::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         for k in keys.iter() {
             env.storage().persistent().set(&DataKey::Record(k), &val);
@@ -116,7 +116,7 @@ impl SamplePausableConsumer {
         to: Address,
         amount: i128,
     ) -> Result<(), ConsumerError> {
-        pausable::require_not_paused(&env, ConsumerError::ContractPaused)?;
+        pausable::require_not_paused_or(&env, ConsumerError::ContractPaused)?;
         if amount <= 0 {
             return Err(ConsumerError::InvalidInput);
         }
@@ -152,7 +152,7 @@ impl SamplePausableConsumer {
         key: Symbol,
         val: u32,
     ) -> Result<(), ConsumerError> {
-        pausable::require_not_paused(&env, ConsumerError::ContractPaused)?;
+        pausable::require_not_paused_or(&env, ConsumerError::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Setting(key), &val);
         Ok(())
@@ -218,14 +218,14 @@ impl FlawedPausableConsumer {
 
     /// Correctly guarded mutating method
     pub fn guarded_action(env: Env, val: u32) -> Result<(), ConsumerError> {
-        pausable::require_not_paused(&env, ConsumerError::ContractPaused)?;
+        pausable::require_not_paused_or(&env, ConsumerError::ContractPaused)?;
         env.storage().instance().set(&DataKey::FlagValue, &val);
         Ok(())
     }
 
     /// FLAWED: Mutating method that forgot the `require_not_paused` guard!
     pub fn unguarded_action(env: Env, val: u32) -> Result<(), ConsumerError> {
-        // Missing: pausable::require_not_paused(&env, ConsumerError::ContractPaused)?;
+        // Missing: pausable::require_not_paused_or(&env, ConsumerError::ContractPaused)?;
         env.storage().instance().set(&DataKey::FlagValue, &val);
         Ok(())
     }

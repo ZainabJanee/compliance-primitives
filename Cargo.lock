@@ -25,6 +25,7 @@ name = "allowlist-token"
 version = "0.1.0"
 dependencies = [
  "compliance-pausable",
+ "compliance-test-trace",
  "denylist-gate",
  "denylist-gate-consumer",
  "soroban-sdk",
@@ -326,7 +327,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "compliance-pausable"
+name = "compliance-test-trace"
 version = "0.1.0"
 dependencies = [
  "soroban-sdk",

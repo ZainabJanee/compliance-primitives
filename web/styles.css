@@ -382,7 +382,10 @@ footer .foot-row {
   display: none !important;
 }
 
-/* Explicit user preference overrides the OS default. */
+/* Explicit user preference overrides the OS default.
+ * Dark mode support: prefers-color-scheme is handled by the @media block
+ * above. These overrides allow the manual toggle button to force a theme
+ * independently of the OS setting (stored in localStorage under 'theme'). */
 :root[data-theme="light"] {
   --bg: #ffffff;
   --bg-raised: #f6f7f9;
@@ -390,6 +393,7 @@ footer .foot-row {
   --text: #1a1d23;
   --text-dim: #5b616e;
   --accent: #0060df;
+  --accent-solid: #0060df;
   --accent-bg: #eaf1fd;
   --code-bg: #f6f7f9;
   --code-text: #24292e;
@@ -402,6 +406,7 @@ footer .foot-row {
   --text: #e6e8eb;
   --text-dim: #9aa2ad;
   --accent: #6ea8fe;
+  --accent-solid: #1f6feb;
   --accent-bg: #16233b;
   --code-bg: #151b23;
   --code-text: #d7dbe0;
@@ -507,5 +512,289 @@ img, svg, video, iframe {
   }
   h1 {
     font-size: 28px;
+  }
+}
+
+/* ── Comparison table (#429) ────────────────────────────────────────────── */
+.cmp-table-wrap {
+  overflow-x: auto;
+  margin-top: 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.cmp-table-wrap:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.cmp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.cmp-table th,
+.cmp-table td {
+  padding: 10px 14px;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.cmp-table th[scope="col"] {
+  background: var(--bg-raised);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+
+.cmp-table th[scope="row"] {
+  text-align: left;
+  font-weight: 600;
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 13.5px;
+}
+
+.cmp-table th[scope="row"] a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.cmp-table th[scope="row"] a:hover {
+  text-decoration: underline;
+}
+
+.cmp-table tr:last-child th,
+.cmp-table tr:last-child td {
+  border-bottom: none;
+}
+
+.cmp-yes {
+  color: #2da44e;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.cmp-no {
+  color: var(--text-dim);
+}
+
+.cmp-legend {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 10px;
+}
+
+/* ── Contract-lookup widget (#428) ──────────────────────────────────────── */
+.lookup-form {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 640px;
+}
+
+.lookup-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.lookup-row--actions {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.lookup-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.lookup-hint {
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.lookup-input {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 10px 13px;
+  font: inherit;
+  font-size: 13.5px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.lookup-input:focus {
+  outline: 3px solid var(--accent-bg);
+  border-color: var(--accent);
+}
+
+.lookup-result {
+  margin-top: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+  max-width: 640px;
+}
+
+.lookup-result--ok {
+  border-color: #2da44e;
+}
+
+.lookup-result--error {
+  border-color: #cf222e;
+}
+
+.lookup-result-pre {
+  margin: 0;
+  padding: 16px 18px;
+  font-size: 13px;
+  color: var(--code-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.lookup-note {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  margin-top: 12px;
+  max-width: 640px;
+}
+
+/* Interface spec link inside contract cards */
+.card .fns .interface-link {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+.card .fns .interface-link:hover {
+  text-decoration: underline;
+}
+
+/* Copy-to-clipboard button on code blocks */
+.code-wrap {
+  position: relative;
+}
+.copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+.code-wrap:hover .copy-btn,
+.code-wrap:focus-within .copy-btn {
+  opacity: 1;
+}
+.copy-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.copy-btn[data-copied="true"] {
+  color: #2da44e;
+  border-color: #2da44e;
+}
+
+@media print {
+  @page {
+    margin: 18mm;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+    font-size: 10pt;
+  }
+
+  nav,
+  footer,
+  .cta-row,
+  .theme-toggle,
+  .menu-toggle,
+  .search-label,
+  .search-input,
+  .search-empty,
+  .copy-btn {
+    display: none !important;
+  }
+
+  .wrap {
+    max-width: none;
+    padding: 0;
+  }
+
+  header.hero {
+    padding: 0 0 1rem;
+  }
+
+  .badge {
+    display: none;
+  }
+
+  h1 {
+    font-size: 24pt;
+  }
+
+  .lede,
+  section > p {
+    color: #222;
+  }
+
+  section {
+    padding: 1rem 0;
+    border-color: #999;
+    break-inside: avoid;
+  }
+
+  .cards {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+
+  .card,
+  .flow,
+  pre.code {
+    background: #fff;
+    border-color: #999;
+    color: #000;
+    break-inside: avoid;
+  }
+
+  .flow,
+  pre.code {
+    overflow: visible;
+  }
+
+  .flow pre,
+  pre.code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  a {
+    color: #000;
+    text-decoration: underline;
   }
 }
