@@ -781,6 +781,42 @@ fn test_evaluate_verbose_fails_surfaces_check_failure() {
     );
 }
 
+/// A failed `Any` policy reports that all checks failed, not an arbitrary
+/// check at index zero.
+#[test]
+fn test_evaluate_verbose_any_failure_does_not_blame_first_check() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deny_id = setup_denylist(&env);
+    let juri_id = setup_jurisdiction(&env);
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+    MockDenylistClient::new(&env, &deny_id).add_to_denylist(&from);
+
+    let (admin, _engine_id, client) = setup_engine_any(&env);
+    client.add_check(
+        &admin,
+        &CheckKind::Denylist(DenylistCheck {
+            contract: deny_id,
+        }),
+    );
+    client.add_check(
+        &admin,
+        &CheckKind::Jurisdiction(JurisdictionCheck {
+            contract: juri_id,
+            allowed_codes: vec![&env, String::from_str(&env, "US")],
+        }),
+    );
+
+    let (passed, failure) = client.evaluate_verbose(&from, &to);
+    assert!(!passed, "expected policy to fail");
+
+    let failure = failure.expect("expected failure details for failed Any policy");
+    assert_eq!(failure.check_index, u32::MAX);
+    assert_eq!(failure.kind, soroban_sdk::Symbol::new(&env, "AllFailed"));
+}
+
 // ---------------------------------------------------------------------------
 // Tests for issue #406: get_check(index) view function
 // ---------------------------------------------------------------------------

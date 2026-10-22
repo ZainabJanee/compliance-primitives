@@ -348,17 +348,14 @@ pub struct UpgradePerformed {
     pub admin: Address,
 }
 
-/// Carries information about which check in the list failed and what kind it
-/// was. Serializable on-chain, so it can be embedded in contract events or
-/// returned from view calls.
+/// Carries information about a failed check. Serializable on-chain, so it can
+/// be embedded in contract events or returned from view calls.
 ///
 /// ## Intended use
 ///
 /// `CheckFailure` is the payload surfaced by [`PolicyEngine::evaluate_verbose`],
-/// an extended variant of `evaluate` that returns the index and kind of the
-/// **first** check that caused the policy to fail, in addition to the overall
-/// pass/fail result. This makes it possible to diagnose a failed policy
-/// evaluation without re-running each check individually in a separate call.
+/// an extended variant of `evaluate` that returns details about a failed
+/// policy, in addition to the overall pass/fail result.
 ///
 /// ### Design sketch
 ///
@@ -368,15 +365,16 @@ pub struct UpgradePerformed {
 /// ```
 ///
 /// - When the policy **passes**, the second element is `None`.
-/// - When the policy **fails**, the second element is `Some(CheckFailure)`
-///   where `check_index` is the zero-based position of the first failing check
-///   in the registered `Vec<CheckKind>` and `kind` is a `Symbol` naming the
-///   variant (e.g. `Symbol::new(env, "Denylist")`).
+/// - When an `All` policy **fails**, the second element is `Some(CheckFailure)`
+///   with the zero-based index and kind of the first failing check.
+/// - When an `Any` policy **fails**, the second element is
+///   `Some(CheckFailure { check_index: u32::MAX, kind: "AllFailed" })` because
+///   every check failed; no individual check is singled out.
 ///
 /// Off-chain tooling (block explorers, compliance dashboards) can call
 /// `evaluate_verbose` once and immediately know both the outcome and, on
-/// failure, precisely which rule triggered the rejection — without needing to
-/// reconstruct the full check list from storage.
+/// failure, which rule first failed under `All`, or that every rule failed
+/// under `Any`, without needing a second evaluation call.
 ///
 /// ### Why `Option<CheckFailure>` instead of embedding in the error
 ///
@@ -396,10 +394,13 @@ pub struct UpgradePerformed {
 #[contracttype]
 #[derive(Clone)]
 pub struct CheckFailure {
-    /// Zero-based index into the `Vec<CheckKind>` of the first failing check.
+    /// Zero-based index into the `Vec<CheckKind>` of the first failing check
+    /// under `All`. Under `Any`, `u32::MAX` means every check failed and there
+    /// is no single failing check to identify.
     pub check_index: u32,
-    /// Short `Symbol` name of the `CheckKind` variant that failed, e.g.
-    /// `"Denylist"`, `"Jurisdiction"`, `"Allowlist"`, or `"CircuitBreaker"`.
+    /// Short `Symbol` name of the failed `CheckKind` variant under `All`, e.g.
+    /// `"Denylist"` or `"Jurisdiction"`. Under `Any`, this is `"AllFailed"`
+    /// when every check fails.
     pub kind: Symbol,
 }
 
@@ -654,13 +655,14 @@ impl PolicyEngine {
         Ok(results)
     }
 
-    /// Like `evaluate`, but on failure also returns a [`CheckFailure`]
-    /// describing the **first** check that caused the policy to fail.
+    /// Like `evaluate`, but on failure also returns a [`CheckFailure`] with
+    /// details appropriate to the configured combine operation.
     ///
     /// Returns `Ok((true, None))` when the policy passes. Returns
-    /// `Ok((false, Some(CheckFailure { check_index, kind })))` when the
-    /// policy fails, giving callers the zero-based index and the `Symbol`
-    /// name of the failing check kind without needing a second round-trip.
+    /// `Ok((false, Some(CheckFailure { check_index, kind })))` when an `All`
+    /// policy fails, reporting the first failing check. For a failed `Any`
+    /// policy, `check_index` is `u32::MAX` and `kind` is `"AllFailed"` because
+    /// every check failed and no individual check is representative.
     ///
     /// A `PolicyResult` event is emitted just as in `evaluate`, keeping the
     /// audit trail intact regardless of the outcome. The circuit-breaker
@@ -737,13 +739,11 @@ impl PolicyEngine {
                     if any_pass {
                         (true, None)
                     } else {
-                        // Surface the first check as the representative failure.
-                        let first = checks.get(0).unwrap();
                         (
                             false,
                             Some(CheckFailure {
-                                check_index: 0,
-                                kind: Self::check_kind_symbol(&env, &first),
+                                check_index: u32::MAX,
+                                kind: Symbol::new(&env, "AllFailed"),
                             }),
                         )
                     }
